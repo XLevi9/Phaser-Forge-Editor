@@ -153,6 +153,49 @@ export default function App() {
     setHierarchy(prev => prev.map(i => i.id === id ? { ...i, locked: !i.locked } : i));
   }, []);
 
+  // Dev server
+  type DevStatus = 'idle' | 'starting' | 'running' | 'error';
+  const [devStatus, setDevStatus] = useState<DevStatus>('idle');
+  const [devUrl, setDevUrl] = useState<string | null>(null);
+  const [devLogs, setDevLogs] = useState('');
+  const [activeTab, setActiveTab] = useState<'assets' | 'console'>('assets');
+  const consoleEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    api?.onDevServerOutput((text: string) => {
+      setDevLogs(prev => prev + text);
+      setTimeout(() => consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+    });
+    api?.onDevServerStopped(() => {
+      setDevStatus('idle');
+      setDevUrl(null);
+    });
+    return () => api?.removeDevServerListeners();
+  }, []);
+
+  const handleRunStop = async () => {
+    const api = (window as any).electronAPI;
+    if (devStatus === 'running' || devStatus === 'starting') {
+      await api?.stopDevServer();
+      setDevStatus('idle');
+      setDevUrl(null);
+    } else {
+      if (!projectFolder) return;
+      setDevStatus('starting');
+      setDevLogs('');
+      setActiveTab('console');
+      const result = await api?.startDevServer(projectFolder);
+      if (result?.ok && result.url) {
+        setDevStatus('running');
+        setDevUrl(result.url);
+      } else {
+        setDevStatus('error');
+        setDevLogs(prev => prev + `\n[Error: ${result?.error ?? 'Unknown error'}]\n`);
+      }
+    }
+  };
+
   // Drag overlay
   const [isDraggingAsset, setIsDraggingAsset] = useState(false);
 
@@ -168,7 +211,8 @@ export default function App() {
     if (hierarchy.length > 0) setSaveStatus('unsaved');
   }, [hierarchy]);
 
-  const iframeSrc = `./phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
+  const designSrc = `./phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
+  const iframeSrc = devUrl ?? designSrc;
 
   const toPhaser = useCallback((msg: object) => {
     iframeRef.current?.contentWindow?.postMessage(msg, '*');
@@ -507,7 +551,22 @@ export default function App() {
         {saveStatus === 'unsaved' && <span className="text-[10px] text-yellow-600 hidden xl:block">unsaved</span>}
         {saveStatus === 'saving'  && <span className="text-[10px] text-gray-500 hidden xl:block">saving…</span>}
         {saveStatus === 'saved'   && <span className="text-[10px] text-gray-700 hidden xl:block">saved</span>}
-        <ToolBtn icon="▶" label="Play" onClick={() => {}} extra="text-green-400" />
+        {devStatus === 'running' && (
+          <span className="text-[10px] font-mono text-green-600 border border-green-900 rounded px-1.5 py-0.5 hidden xl:flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
+            {devUrl}
+          </span>
+        )}
+        <ToolBtn
+          icon={devStatus === 'running' ? '⏹' : devStatus === 'starting' ? '⏳' : '▶'}
+          label={devStatus === 'running' ? 'Stop' : devStatus === 'starting' ? 'Starting…' : 'Run Game'}
+          onClick={handleRunStop}
+          disabled={!projectFolder || devStatus === 'starting'}
+          extra={devStatus === 'running' ? 'text-red-400' : devStatus === 'error' ? 'text-orange-400' : 'text-green-400'}
+        />
+        <ToolBtn icon="⌨" label="VS Code" onClick={() => {
+          if (projectFolder) (window as any).electronAPI?.openVSCode(projectFolder);
+        }} disabled={!projectFolder} />
         <ToolBtn icon="💾" label="Save (Ctrl+S)" onClick={handleSave} disabled={!projectFolder} />
       </header>
 
@@ -563,8 +622,15 @@ export default function App() {
 
           {/* Badges */}
           <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
-            <span className="bg-gray-900/80 backdrop-blur text-gray-300 text-xs px-2 py-1 rounded uppercase tracking-wider border border-gray-700">{toolMode}</span>
-            {snapEnabled && <span className="bg-blue-900/80 backdrop-blur text-blue-300 text-xs px-2 py-1 rounded border border-blue-700">SNAP 32px</span>}
+            {devUrl ? (
+              <span className="bg-green-900/90 backdrop-blur text-green-300 text-xs px-2 py-1 rounded uppercase tracking-wider border border-green-700 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                LIVE
+              </span>
+            ) : (
+              <span className="bg-gray-900/80 backdrop-blur text-gray-300 text-xs px-2 py-1 rounded uppercase tracking-wider border border-gray-700">{toolMode}</span>
+            )}
+            {!devUrl && snapEnabled && <span className="bg-blue-900/80 backdrop-blur text-blue-300 text-xs px-2 py-1 rounded border border-blue-700">SNAP 32px</span>}
           </div>
           <div className="absolute bottom-3 left-3 text-gray-700 text-[10px] pointer-events-none">
             Q·W·E·R = tools &nbsp;·&nbsp; Scroll = zoom &nbsp;·&nbsp; Middle mouse = pan &nbsp;·&nbsp; F = reset view &nbsp;·&nbsp; Del = delete
@@ -714,29 +780,64 @@ export default function App() {
           </div>
         )}
 
-        {/* Panel header */}
-        <div className="px-3 flex items-center gap-3 h-9 border-b border-gray-700">
-          <button onClick={() => setPanelOpen(o => !o)} className="text-gray-500 hover:text-white transition-colors">
+        {/* Panel header with tabs */}
+        <div className="px-3 flex items-center gap-1 h-9 border-b border-gray-700">
+          <button onClick={() => setPanelOpen(o => !o)} className="text-gray-500 hover:text-white transition-colors mr-1">
             {panelOpen ? '▾' : '▸'}
           </button>
-          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Assets</span>
-          {projectFolder && (
-            <span className="text-[10px] text-gray-600 ml-1 truncate max-w-48">{projectFolder}</span>
-          )}
+          {/* Tabs */}
+          {(['assets', 'console'] as const).map(tab => (
+            <button key={tab} onClick={() => { setActiveTab(tab); if (!panelOpen) setPanelOpen(true); }}
+              className={`px-3 py-1 text-xs rounded-t font-medium transition-colors ${
+                activeTab === tab && panelOpen
+                  ? 'bg-gray-900 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}>
+              {tab === 'assets' ? 'Assets' : (
+                <span className="flex items-center gap-1">
+                  Console
+                  {devStatus === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-green-500" />}
+                  {devStatus === 'error'   && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+                </span>
+              )}
+            </button>
+          ))}
           <div className="flex-1" />
-          <button onClick={handleOpenProject} className="text-xs text-gray-500 hover:text-white transition-colors px-2 py-0.5 rounded hover:bg-gray-700">
-            📁 {projectFolder ? 'Change' : 'Open Folder'}
-          </button>
+          {activeTab === 'assets' && (
+            <button onClick={handleOpenProject} className="text-xs text-gray-500 hover:text-white transition-colors px-2 py-0.5 rounded hover:bg-gray-700">
+              📁 {projectFolder ? 'Change' : 'Open Folder'}
+            </button>
+          )}
+          {activeTab === 'console' && devLogs && (
+            <button onClick={() => setDevLogs('')} className="text-xs text-gray-600 hover:text-white transition-colors px-2 py-0.5 rounded hover:bg-gray-700">
+              Clear
+            </button>
+          )}
         </div>
 
         {/* Panel content */}
-        {panelOpen && (
+        {panelOpen && activeTab === 'assets' && (
           <div style={{ height: panelH - 4 }} className="flex overflow-hidden">
             <AssetBrowser
               projectFolder={projectFolder}
               onOpenProject={handleOpenProject}
               onDragAsset={() => setIsDraggingAsset(true)}
             />
+          </div>
+        )}
+
+        {panelOpen && activeTab === 'console' && (
+          <div style={{ height: panelH - 4 }} className="bg-gray-950 overflow-y-auto font-mono text-[11px] p-2">
+            {devLogs ? (
+              <>
+                <pre className="text-gray-300 whitespace-pre-wrap leading-relaxed">{devLogs}</pre>
+                <div ref={consoleEndRef} />
+              </>
+            ) : (
+              <p className="text-gray-700 text-center py-6">
+                {devStatus === 'idle' ? 'Press ▶ Run Game to start the dev server.' : 'Waiting for output…'}
+              </p>
+            )}
           </div>
         )}
       </footer>
