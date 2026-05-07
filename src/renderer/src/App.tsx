@@ -168,7 +168,7 @@ export default function App() {
     if (hierarchy.length > 0) setSaveStatus('unsaved');
   }, [hierarchy]);
 
-  const iframeSrc = `/phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
+  const iframeSrc = `./phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
 
   const toPhaser = useCallback((msg: object) => {
     iframeRef.current?.contentWindow?.postMessage(msg, '*');

@@ -1,4 +1,10 @@
 {
+  "name": "phaser-forge-editor",
+  "version": "0.1.0",
+  "description": "Visual scene editor for Phaser 4 games",
+  "author": "Oky Askal",
+  "license": "MIT",
+  "main": "./out/main/index.js",
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^1.14.0",
@@ -15,6 +21,7 @@
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.5.0",
     "electron": "^42.0.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "postcss": "^8.5.14",
     "tailwindcss": "^4.2.4",
@@ -23,7 +30,38 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build"
+    "build": "electron-vite build",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux"
   },
-  "main": "./out/main/index.js"
+  "build": {
+    "appId": "com.phaserforge.editor",
+    "productName": "Phaser Forge Editor",
+    "copyright": "Copyright © 2026 Oky Askal",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "!out/**/*.map"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
 }

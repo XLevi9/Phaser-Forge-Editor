@@ -1,6 +1,8 @@
 node_modules
 dist
 out
+release
+temp-asar
 .env
 .DS_Store
 *.log
