@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 
 type AssetFile = { name: string; type: 'file'; path: string; fullPath: string; ext: string; };
 type AssetFolder = { name: string; type: 'folder'; path: string; children: AssetEntry[]; };
@@ -8,13 +8,13 @@ type ViewMode = 'list' | 'grid-sm' | 'grid-lg';
 interface Props {
   projectFolder: string | null;
   onOpenProject: () => void;
-  onDragAsset:   (file: AssetFile) => void;
+  onDragAsset: (file: AssetFile) => void;
 }
 
-// File thumbnail
-function FileThumb({
-  file, onDragAsset, viewMode,
-}: { file: AssetFile; onDragAsset: (f: AssetFile) => void; viewMode: ViewMode }) {
+// ── FileThumb ─────────────────────────────────────────────────────────────────
+function FileThumb({ file, onDragAsset, viewMode }: {
+  file: AssetFile; onDragAsset: (f: AssetFile) => void; viewMode: ViewMode;
+}) {
   const [src, setSrc] = useState<string | null>(null);
 
   React.useEffect(() => {
@@ -24,7 +24,6 @@ function FileThumb({
   }, [file.fullPath]);
 
   const handleDragStart = (e: React.DragEvent) => {
-    // Include dataUrl so phaser-main can load the texture
     e.dataTransfer.setData('application/phaser-asset', JSON.stringify({ ...file, dataUrl: src ?? '' }));
     onDragAsset(file);
   };
@@ -34,8 +33,9 @@ function FileThumb({
       <div draggable onDragStart={handleDragStart} title={file.name}
         className="flex items-center gap-2 px-2 py-1 rounded cursor-grab hover:bg-gray-700 transition-colors group">
         <div className="w-6 h-6 flex-shrink-0 rounded overflow-hidden bg-gray-900 border border-gray-700 flex items-center justify-center">
-          {src ? <img src={src} alt="" className="w-full h-full object-contain" />
-               : <span className="text-gray-600 text-[8px]">{file.ext.replace('.','')}</span>}
+          {src
+            ? <img src={src} alt="" className="w-full h-full object-contain" />
+            : <span className="text-gray-600 text-[8px]">{file.ext.replace('.', '')}</span>}
         </div>
         <span className="text-xs text-gray-300 truncate group-hover:text-white flex-1">{file.name}</span>
       </div>
@@ -44,16 +44,16 @@ function FileThumb({
 
   const isLarge = viewMode === 'grid-lg';
   const sz = isLarge ? 'w-20 h-20' : 'w-12 h-12';
-  const textSz = isLarge ? 'text-[10px]' : 'text-[9px]';
 
   return (
     <div draggable onDragStart={handleDragStart} title={file.name}
       className="flex flex-col items-center gap-1 p-1.5 rounded cursor-grab hover:bg-gray-700 transition-colors group">
       <div className={`${sz} flex-shrink-0 rounded overflow-hidden bg-gray-900 border border-gray-700 flex items-center justify-center`}>
-        {src ? <img src={src} alt="" className="w-full h-full object-contain" />
-             : <span className="text-gray-600 text-[10px]">{file.ext.replace('.','')}</span>}
+        {src
+          ? <img src={src} alt="" className="w-full h-full object-contain" />
+          : <span className="text-gray-600 text-[10px]">{file.ext.replace('.', '')}</span>}
       </div>
-      <span className={`${textSz} text-gray-400 group-hover:text-white text-center leading-tight max-w-full`}
+      <span className={`${isLarge ? 'text-[10px]' : 'text-[9px]'} text-gray-400 group-hover:text-white text-center leading-tight max-w-full`}
         style={{ wordBreak: 'break-all', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
         {file.name}
       </span>
@@ -61,44 +61,55 @@ function FileThumb({
   );
 }
 
-// Folder row
-function FolderRow({ folder, onDragAsset, viewMode }: {
-  folder: AssetFolder; onDragAsset: (f: AssetFile) => void; viewMode: ViewMode;
+// ── FolderNode (left tree — folders only) ────────────────────────────────────
+function FolderNode({ folder, selectedPath, onSelect, depth }: {
+  folder: AssetFolder; selectedPath: string | null;
+  onSelect: (f: AssetFolder) => void; depth: number;
 }) {
-  const [open, setOpen] = useState(true);
+  const subFolders = folder.children.filter(c => c.type === 'folder') as AssetFolder[];
+  const [open, setOpen] = useState(depth === 0);
+  const isSelected = selectedPath === folder.path;
+
   return (
     <div>
-      <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors">
-        <span className="opacity-70">{open ? '▾' : '▸'}</span>
-        <span>📂</span>
-        <span className="truncate">{folder.name}</span>
+      <button
+        onClick={() => { onSelect(folder); if (subFolders.length > 0) setOpen(o => !o); }}
+        className={`w-full flex items-center gap-1 py-1 pr-2 text-xs rounded transition-colors text-left truncate ${
+          isSelected ? 'bg-blue-700 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+        style={{ paddingLeft: `${8 + depth * 12}px` }}
+      >
+        {subFolders.length > 0
+          ? <span className="text-[8px] w-3 flex-shrink-0">{open ? '▾' : '▸'}</span>
+          : <span className="w-3 flex-shrink-0" />}
+        <span className="flex-shrink-0">📁</span>
+        <span className="truncate ml-1">{folder.name}</span>
       </button>
-      {open && (
-        <div className={`pl-3 ${viewMode !== 'list' ? 'flex flex-wrap gap-1 py-1' : ''}`}>
-          {folder.children.map(child =>
-            child.type === 'folder'
-              ? <FolderRow key={child.path} folder={child} onDragAsset={onDragAsset} viewMode={viewMode} />
-              : <FileThumb key={child.path} file={child} onDragAsset={onDragAsset} viewMode={viewMode} />
-          )}
-        </div>
-      )}
+      {open && subFolders.map(sub => (
+        <FolderNode key={sub.path} folder={sub} selectedPath={selectedPath} onSelect={onSelect} depth={depth + 1} />
+      ))}
     </div>
   );
 }
 
-// AssetBrowser
+// ── AssetBrowser ──────────────────────────────────────────────────────────────
 export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset }: Props) {
-  const [assets,   setAssets]   = useState<AssetEntry[]>([]);
-  const [loading,  setLoading]  = useState(false);
-  const [search,   setSearch]   = useState('');
+  const [assets, setAssets] = useState<AssetEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [selectedFolder, setSelectedFolder] = useState<AssetFolder | null>(null);
+
+  // Left panel resize
+  const [leftW, setLeftW] = useState(140);
+  const divResizing = useRef(false);
+  const divStart = useRef({ x: 0, w: 0 });
 
   const loadAssets = useCallback(async (folder: string) => {
     setLoading(true);
     try {
       const result = await (window as any).electronAPI.readAssets(folder);
       setAssets(result);
+      setSelectedFolder(null);
     } finally {
       setLoading(false);
     }
@@ -110,17 +121,36 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
   }, [projectFolder]);
 
   const flatFiles = useCallback((entries: AssetEntry[]): AssetFile[] => {
-    const result: AssetFile[] = [];
+    const out: AssetFile[] = [];
     for (const e of entries) {
-      if (e.type === 'file') result.push(e);
-      else result.push(...flatFiles(e.children));
+      if (e.type === 'file') out.push(e);
+      else out.push(...flatFiles(e.children));
     }
-    return result;
+    return out;
   }, []);
 
-  const searchResults = search.trim()
-    ? flatFiles(assets).filter(f => f.name.toLowerCase().includes(search.toLowerCase()))
-    : null;
+  const startDivResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    divResizing.current = true;
+    divStart.current = { x: e.clientX, w: leftW };
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!divResizing.current) return;
+      const w = divStart.current.w + (ev.clientX - divStart.current.x);
+      setLeftW(Math.max(80, Math.min(280, w)));
+    };
+    const onUp = () => {
+      divResizing.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   if (!projectFolder) return (
     <div className="flex-1 flex flex-col items-center justify-center gap-3 p-4">
@@ -133,6 +163,19 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
     </div>
   );
 
+  const folders = assets.filter(e => e.type === 'folder') as AssetFolder[];
+  const isGrid = viewMode !== 'list';
+
+  // Contents of selected folder (or root)
+  const activeEntries: AssetEntry[] = selectedFolder ? selectedFolder.children : assets;
+  const activeFiles = activeEntries.filter(e => e.type === 'file') as AssetFile[];
+  const activeFolders = activeEntries.filter(e => e.type === 'folder') as AssetFolder[];
+
+  // Search overrides folder selection
+  const searchResults = search.trim()
+    ? flatFiles(assets).filter(f => f.name.toLowerCase().includes(search.toLowerCase()))
+    : null;
+
   const ViewBtn = ({ mode, icon, title }: { mode: ViewMode; icon: string; title: string }) => (
     <button onClick={() => setViewMode(mode)} title={title}
       className={`px-1.5 py-1 rounded text-xs transition-colors ${
@@ -141,44 +184,92 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
     </button>
   );
 
-  const isGrid = viewMode !== 'list';
-
   return (
     <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-      {/* Toolbar: search + view mode toggle */}
+      {/* Toolbar */}
       <div className="px-2 py-1.5 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
         <input value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Search assets…"
           className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500 placeholder-gray-600" />
         <div className="flex items-center gap-0.5 flex-shrink-0">
-          <ViewBtn mode="list"    icon="☰" title="List view" />
+          <ViewBtn mode="list" icon="☰" title="List" />
           <ViewBtn mode="grid-sm" icon="⊞" title="Small icons" />
           <ViewBtn mode="grid-lg" icon="⬛" title="Large icons" />
         </div>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-1.5">
-        {loading && <p className="text-xs text-gray-600 text-center py-4">Scanning…</p>}
-        {!loading && assets.length === 0 && (
-          <p className="text-xs text-gray-600 text-center py-4">No images found in project.</p>
-        )}
+      {/* Two-panel body */}
+      <div className="flex flex-1 overflow-hidden">
 
-        {searchResults ? (
-          <div className={isGrid ? 'flex flex-wrap gap-1' : ''}>
-            {searchResults.map(f =>
-              <FileThumb key={f.path} file={f} onDragAsset={onDragAsset} viewMode={viewMode} />
+        {/* Left: Folder tree */}
+        <div className="flex-shrink-0 overflow-y-auto border-r border-gray-700 py-1"
+          style={{ width: leftW }}>
+          {loading
+            ? <p className="text-xs text-gray-600 text-center py-4">Scanning…</p>
+            : (
+              <>
+                {/* Root entry */}
+                <button
+                  onClick={() => setSelectedFolder(null)}
+                  className={`w-full flex items-center gap-1.5 px-2 py-1 text-xs rounded transition-colors text-left ${
+                    !selectedFolder ? 'bg-blue-700 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}>
+                  <span>🗂</span>
+                  <span className="truncate">All Assets</span>
+                </button>
+                {folders.map(f => (
+                  <FolderNode key={f.path} folder={f} selectedPath={selectedFolder?.path ?? null}
+                    onSelect={setSelectedFolder} depth={0} />
+                ))}
+              </>
             )}
-          </div>
-        ) : (
-          <div className={isGrid ? 'flex flex-wrap gap-1' : ''}>
-            {assets.map(e =>
-              e.type === 'folder'
-                ? <FolderRow key={e.path} folder={e} onDragAsset={onDragAsset} viewMode={viewMode} />
-                : <FileThumb key={e.path} file={e as AssetFile} onDragAsset={onDragAsset} viewMode={viewMode} />
-            )}
-          </div>
-        )}
+        </div>
+
+        {/* Divider */}
+        <div onMouseDown={startDivResize}
+          className="w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent group">
+          <div className="w-px h-full mx-auto bg-gray-700 group-hover:bg-blue-500 transition-colors" />
+        </div>
+
+        {/* Right: File contents */}
+        <div className="flex-1 overflow-y-auto p-1.5 min-w-0">
+          {loading && <p className="text-xs text-gray-600 text-center py-4">Scanning…</p>}
+
+          {searchResults ? (
+            // Search mode: flat list of all matches
+            <div className={isGrid ? 'flex flex-wrap gap-1' : ''}>
+              {searchResults.length === 0
+                ? <p className="text-xs text-gray-600 text-center py-4">No results.</p>
+                : searchResults.map(f => <FileThumb key={f.path} file={f} onDragAsset={onDragAsset} viewMode={viewMode} />)}
+            </div>
+          ) : (
+            // Normal mode: show selected folder contents
+            <>
+              {/* Sub-folders as clickable cards */}
+              {activeFolders.length > 0 && (
+                <div className={`mb-1 ${isGrid ? 'flex flex-wrap gap-1' : ''}`}>
+                  {activeFolders.map(f => (
+                    <button key={f.path} onClick={() => setSelectedFolder(f)}
+                      className={`${isGrid
+                        ? 'flex flex-col items-center gap-1 p-1.5 rounded hover:bg-gray-700 transition-colors'
+                        : 'w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-700 transition-colors'}`}>
+                      <span className={isGrid ? 'text-2xl' : 'text-sm'}>📁</span>
+                      <span className="text-xs text-gray-400 truncate">{f.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Files */}
+              {activeFiles.length === 0 && activeFolders.length === 0 && !loading && (
+                <p className="text-xs text-gray-600 text-center py-4">No images here.</p>
+              )}
+              <div className={isGrid ? 'flex flex-wrap gap-1' : ''}>
+                {activeFiles.map(f => (
+                  <FileThumb key={f.path} file={f} onDragAsset={onDragAsset} viewMode={viewMode} />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

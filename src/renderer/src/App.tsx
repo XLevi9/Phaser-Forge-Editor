@@ -114,7 +114,46 @@ export default function App() {
   const resizingRef = useRef(false);
   const resizeStartRef = useRef({ y: 0, h: 0 });
 
-  // Drag overlay — shown over iframe while user is dragging an asset
+  // Hierarchy + Inspector panel widths
+  const [hierarchyW, setHierarchyW] = useState(208);
+  const [inspectorW, setInspectorW] = useState(256);
+  const makeHResizer = (setter: (w: number) => void, dir: 'left' | 'right') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = dir === 'left' ? hierarchyW : inspectorW;
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (ev: MouseEvent) => {
+      const delta = dir === 'left' ? ev.clientX - startX : startX - ev.clientX;
+      setter(Math.max(140, Math.min(400, startW + delta)));
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // Lock state
+  const [lockedIds, setLockedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    toPhaser({ type: 'SET_LOCKED_IDS', ids: [...lockedIds] });
+  }, [lockedIds]);
+
+  const toggleLocked = useCallback((id: string) => {
+    setLockedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, locked: !i.locked } : i));
+  }, []);
+
+  // Drag overlay
   const [isDraggingAsset, setIsDraggingAsset] = useState(false);
 
   const iframeSrc = `/phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
@@ -134,7 +173,8 @@ export default function App() {
       const m = ev.data;
       if (!m?.type) return;
       switch (m.type) {
-        case 'SCENE_READY': setHierarchy(m.hierarchy ?? []); break;
+        case 'SCENE_READY':
+          setHierarchy((m.hierarchy ?? []).map((i: any) => ({ ...i, visible: true, locked: false }))); break;
         case 'OBJECT_SELECTED':
           store.setSelectedObject(m.id, {
             x: round2(m.x ?? 0), y: round2(m.y ?? 0),
@@ -171,7 +211,7 @@ export default function App() {
           }); break;
         }
         case 'OBJECT_ADDED':
-          setHierarchy(prev => [...prev, { id: m.id, name: m.name, type: m.objType }]); break;
+          setHierarchy(prev => [...prev, { id: m.id, name: m.name, type: m.objType, visible: true, locked: false }]); break;
         case 'OBJECT_REMOVED':
           setHierarchy(prev => prev.filter(i => i.id !== m.id));
           if (useEditorStore.getState().selectedId === m.id) store.setSelectedObject(null); break;
@@ -224,6 +264,8 @@ export default function App() {
     e.preventDefault();
     resizingRef.current = true;
     resizeStartRef.current = { y: e.clientY, h: panelH };
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
 
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return;
@@ -232,6 +274,8 @@ export default function App() {
     };
     const onUp = () => {
       resizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
@@ -399,15 +443,25 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* ── Hierarchy — also accepts asset drops ── */}
-        <div
+        <div style={{ width: hierarchyW }}
+          className={`flex-shrink-0 relative ${isDraggingAsset ? 'ring-1 ring-inset ring-blue-600/40' : ''}`}
           onDragOver={isDraggingAsset ? e => e.preventDefault() : undefined}
           onDrop={isDraggingAsset ? handleDropOnHierarchy : undefined}
-          className={`relative ${isDraggingAsset ? 'ring-1 ring-inset ring-blue-600/40' : ''}`}
         >
           <HierarchyPanel
             items={hierarchy} selectedId={selectedId}
             onSelect={handleSelectObject} onDelete={handleDeleteObject}
             onDuplicate={handleDuplicateObject} onRename={handleRenameObject}
+            onAddPrimitive={shape => toPhaser({ type: 'ADD_PRIMITIVE', shape })}
+            onToggleVisible={id => {
+              const item = hierarchy.find(i => i.id === id);
+              if (!item) return;
+              const next = !item.visible;
+              setHierarchy(prev => prev.map(i => i.id === id ? { ...i, visible: next } : i));
+              toPhaser({ type: 'SET_PROPERTIES', id, visible: next });
+              if (selectedId === id) store.updateProperties({ visible: next });
+            }}
+            onToggleLocked={id => toggleLocked(id)}
           />
           {isDraggingAsset && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -415,6 +469,9 @@ export default function App() {
             </div>
           )}
         </div>
+        {/* Hierarchy resize handle */}
+        <div onMouseDown={makeHResizer(setHierarchyW, 'left')}
+          className={`w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent `} />
 
         {/* ── Viewport ── */}
         <main className="flex-1 bg-[#0a0f1a] relative overflow-hidden">
@@ -427,7 +484,6 @@ export default function App() {
               className="absolute inset-0 z-10 cursor-copy"
               onDragOver={e => e.preventDefault()}
               onDrop={handleDropAsset}
-              onDragLeave={() => setIsDraggingAsset(false)}
             >
               <div className="absolute inset-0 border-2 border-dashed border-blue-500/40 pointer-events-none" />
             </div>
@@ -443,8 +499,11 @@ export default function App() {
           </div>
         </main>
 
+        {/* Inspector resize handle */}
+        <div onMouseDown={makeHResizer(setInspectorW, 'right')}
+          className={`w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent `} />
         {/* ── Inspector ── */}
-        <aside className="w-64 flex flex-col border-l border-gray-700 bg-gray-800 overflow-y-auto flex-shrink-0">
+        <aside style={{ width: inspectorW }} className="flex-shrink-0 flex flex-col border-l border-gray-700 bg-gray-800 overflow-y-auto">
           <div className="px-3 py-2 border-b border-gray-700">
             <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Inspector</span>
           </div>
@@ -573,13 +632,14 @@ export default function App() {
       <footer className="border-t border-gray-700 bg-gray-800 flex-shrink-0"
         style={{ height: panelOpen ? panelH + 36 : 36 }}>
 
-        {/* Resize handle */}
         {panelOpen && (
           <div
             onMouseDown={startPanelResize}
-            className="h-1 w-full cursor-ns-resize bg-gray-700 hover:bg-blue-600 transition-colors"
-            title="Drag to resize panel"
-          />
+            className="h-2 w-full cursor-ns-resize flex items-center justify-center group flex-shrink-0"
+            style={{ background: 'transparent' }}
+          >
+            <div className="w-16 h-0.5 rounded-full bg-gray-600 group-hover:bg-blue-500 transition-colors" />
+          </div>
         )}
 
         {/* Panel header */}

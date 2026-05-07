@@ -27,6 +27,7 @@ class EditorScene extends Phaser.Scene {
   private toolMode = 'select';
   private snapOn = false;
   private SNAP = 32;
+  private lockedIds: Set<string> = new Set();
 
   // Camera pan state
   private isPanning = false;
@@ -130,10 +131,11 @@ class EditorScene extends Phaser.Scene {
       if (this.toolMode !== 'select' && this.toolMode !== 'move') return;
       if (this.isPanning) return;
       const s = go as Phaser.GameObjects.Sprite;
+      const id = this.idOf(s);
+      if (!id || this.lockedIds.has(id)) return;
       s.x = this.snap(dx);
       s.y = this.snap(dy);
-      const id = this.idOf(s);
-      if (id) window.parent.postMessage({ type: 'OBJECT_TRANSFORMED', id, x: s.x, y: s.y }, '*');
+      window.parent.postMessage({ type: 'OBJECT_TRANSFORMED', id, x: s.x, y: s.y }, '*');
     });
 
     this.input.on('dragend', (_p: any, go: Phaser.GameObjects.GameObject) => {
@@ -157,7 +159,7 @@ class EditorScene extends Phaser.Scene {
       if (targets.length > 0) {
         const spr = targets[0] as Phaser.GameObjects.Sprite;
         const id = this.idOf(spr);
-        if (id) this.selectSprite(id, spr);
+        if (id && !this.lockedIds.has(id)) this.selectSprite(id, spr);
       } else if (gos.length === 0) {
         this.deselect();
       }
@@ -194,6 +196,7 @@ class EditorScene extends Phaser.Scene {
 
       if (m.type === 'SET_TOOL_MODE') this.toolMode = m.mode;
       if (m.type === 'SET_SNAP') this.snapOn = m.enabled;
+      if (m.type === 'SET_LOCKED_IDS') this.lockedIds = new Set(m.ids as string[]);
 
       if (m.type === 'RESET_CAMERA') {
         this.cameras.main.setScroll(0, 0);
@@ -254,6 +257,37 @@ class EditorScene extends Phaser.Scene {
 
       if (m.type === 'RENAME_OBJECT') {
         window.parent.postMessage({ type: 'OBJECT_RENAMED', id: m.id, name: m.name }, '*');
+      }
+
+      if (m.type === 'ADD_PRIMITIVE') {
+        const shape = m.shape as 'rect' | 'circle' | 'triangle';
+        const key = `primitive_${shape}_${Date.now()}`;
+        const sz = 64;
+        const color = 0xffffff;
+        const g = this.add.graphics();
+        g.fillStyle(color, 1);
+        g.lineStyle(2, 0xffffff, 0.3);
+        if (shape === 'rect') {
+          g.fillRect(2, 2, sz - 4, sz - 4);
+          g.strokeRect(2, 2, sz - 4, sz - 4);
+        } else if (shape === 'circle') {
+          g.fillCircle(sz / 2, sz / 2, sz / 2 - 2);
+          g.strokeCircle(sz / 2, sz / 2, sz / 2 - 2);
+        } else if (shape === 'triangle') {
+          g.fillTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2);
+          g.strokeTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2);
+        }
+        g.generateTexture(key, sz, sz);
+        g.destroy();
+
+        const spr = this.add.sprite(CANVAS_W / 2, CANVAS_H / 2, key);
+        spr.setInteractive({ draggable: true });
+        const id = `${shape}_${Date.now()}`;
+        this.sprites.set(id, spr);
+        const names: Record<string, string> = { rect: 'Rectangle', circle: 'Circle', triangle: 'Triangle' };
+        const types: Record<string, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
+        window.parent.postMessage({ type: 'OBJECT_ADDED', id, name: names[shape], objType: types[shape] }, '*');
+        this.selectSprite(id, spr);
       }
 
       if (m.type === 'ADD_SPRITE_FROM_ASSET') {
