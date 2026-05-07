@@ -12,6 +12,10 @@ export interface ObjectProps {
   depth: number;
   originX: number;
   originY: number;
+  flipX: boolean;
+  flipY: boolean;
+  scrollFactorX: number;
+  scrollFactorY: number;
 }
 
 interface HistoryEntry {
@@ -22,16 +26,13 @@ interface HistoryEntry {
 interface EditorState extends ObjectProps {
   selectedId: string | null;
   snapEnabled: boolean;
-
-  // History for undo/redo
+  texW: number;
+  texH: number;
   past: HistoryEntry[][];
   future: HistoryEntry[][];
-
-  // Actions
-  setSelectedObject: (id: string | null, props?: Partial<ObjectProps>) => void;
+  setSelectedObject: (id: string | null, props?: Partial<ObjectProps>, texW?: number, texH?: number) => void;
   updateProperties: (props: Partial<ObjectProps>) => void;
   toggleSnap: () => void;
-
   pushHistory: (entry: HistoryEntry) => void;
   undo: () => HistoryEntry | null;
   redo: () => HistoryEntry | null;
@@ -43,16 +44,20 @@ const DEFAULTS: ObjectProps = {
   alpha: 1, tint: '#ffffff', visible: true,
   depth: 0,
   originX: 0.5, originY: 0.5,
+  flipX: false, flipY: false,
+  scrollFactorX: 1, scrollFactorY: 1,
 };
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   selectedId: null,
   snapEnabled: false,
+  texW: 0,
+  texH: 0,
   past: [], future: [],
   ...DEFAULTS,
 
-  setSelectedObject: (id, props) =>
-    set({ selectedId: id, ...DEFAULTS, ...props }),
+  setSelectedObject: (id, props, texW = 0, texH = 0) =>
+    set({ selectedId: id, ...DEFAULTS, ...props, texW, texH }),
 
   updateProperties: (props) =>
     set((s) => ({ ...s, ...props })),

@@ -210,10 +210,14 @@ class EditorScene extends Phaser.Scene {
         if (m.scaleY !== undefined) s.scaleY = m.scaleY;
         if (m.alpha !== undefined) s.alpha = m.alpha;
         if (m.visible !== undefined) s.visible = m.visible;
-        if (m.depth    !== undefined) s.setDepth(m.depth);
-        if (m.tint     !== undefined) s.setTint(parseInt(m.tint.replace('#', ''), 16));
-        if (m.originX  !== undefined || m.originY !== undefined)
+        if (m.depth !== undefined) s.setDepth(m.depth);
+        if (m.tint !== undefined) s.setTint(parseInt(m.tint.replace('#', ''), 16));
+        if (m.originX !== undefined || m.originY !== undefined)
           s.setOrigin(m.originX ?? s.originX, m.originY ?? s.originY);
+        if (m.flipX !== undefined || m.flipY !== undefined)
+          s.setFlip(m.flipX ?? s.flipX, m.flipY ?? s.flipY);
+        if (m.scrollFactorX !== undefined || m.scrollFactorY !== undefined)
+          s.setScrollFactor(m.scrollFactorX ?? s.scrollFactorX, m.scrollFactorY ?? s.scrollFactorY);
       }
 
       if (m.type === 'SELECT_OBJECT') {
@@ -238,7 +242,9 @@ class EditorScene extends Phaser.Scene {
           copy.setScale(src.scaleX, src.scaleY).setRotation(src.rotation)
               .setAlpha(src.alpha).setVisible(src.visible)
               .setDepth(src.depth).setTint(src.tintTopLeft)
-              .setOrigin(src.originX, src.originY);
+              .setOrigin(src.originX, src.originY)
+              .setFlip(src.flipX, src.flipY)
+              .setScrollFactor(src.scrollFactorX, src.scrollFactorY);
           copy.setInteractive({ draggable: true });
           this.sprites.set(m.newId, copy);
           const baseName = m.id.replace(/_copy_\d+$/, '');
@@ -409,6 +415,9 @@ class EditorScene extends Phaser.Scene {
       visible: spr.visible,
       depth: spr.depth,
       originX: spr.originX, originY: spr.originY,
+      flipX: spr.flipX, flipY: spr.flipY,
+      scrollFactorX: spr.scrollFactorX, scrollFactorY: spr.scrollFactorY,
+      texW: spr.width, texH: spr.height,
     }, '*');
   }
 

@@ -143,7 +143,9 @@ export default function App() {
             alpha: round2(m.alpha ?? 1), tint: m.tint ?? '#ffffff',
             visible: m.visible ?? true, depth: m.depth ?? 0,
             originX: round2(m.originX ?? 0.5), originY: round2(m.originY ?? 0.5),
-          }); break;
+            flipX: m.flipX ?? false, flipY: m.flipY ?? false,
+            scrollFactorX: m.scrollFactorX ?? 1, scrollFactorY: m.scrollFactorY ?? 1,
+          }, m.texW ?? 0, m.texH ?? 0); break;
         case 'OBJECT_DESELECTED': store.setSelectedObject(null); break;
         case 'OBJECT_TRANSFORMED': {
           const cur = useEditorStore.getState();
@@ -163,7 +165,9 @@ export default function App() {
             id: s.selectedId,
             props: { x: s.x, y: s.y, rotation: s.rotation, scaleX: s.scaleX,
                      scaleY: s.scaleY, alpha: s.alpha, tint: s.tint, visible: s.visible,
-                     depth: s.depth, originX: s.originX, originY: s.originY },
+                     depth: s.depth, originX: s.originX, originY: s.originY,
+                     flipX: s.flipX, flipY: s.flipY,
+                     scrollFactorX: s.scrollFactorX, scrollFactorY: s.scrollFactorY },
           }); break;
         }
         case 'OBJECT_ADDED':
@@ -329,7 +333,7 @@ export default function App() {
     toPhaser({ type: 'SET_SNAP', enabled: store.snapEnabled });
   };
 
-  const { selectedId, x, y, rotation, scaleX, scaleY, alpha, tint, visible, depth, originX, originY, snapEnabled, past, future } = store;
+  const { selectedId, x, y, rotation, scaleX, scaleY, alpha, tint, visible, depth, originX, originY, flipX, flipY, scrollFactorX, scrollFactorY, texW, texH, snapEnabled, past, future } = store;
 
   return (
     <div className="flex h-screen w-screen flex-col bg-gray-900 text-white select-none overflow-hidden">
@@ -506,6 +510,51 @@ export default function App() {
                 </div>
                 <div className="text-[10px] text-gray-600 mt-1">Affects where x/y anchors on the sprite</div>
               </section>
+              <section>
+                <div className="section-label mb-2">Flip</div>
+                <div className="flex gap-2">
+                  {(['X', 'Y'] as const).map(axis => {
+                    const val = axis === 'X' ? flipX : flipY;
+                    const key = axis === 'X' ? 'flipX' : 'flipY';
+                    return (
+                      <button key={axis} onClick={() => updateField(key, !val)}
+                        className={`flex-1 py-1.5 rounded text-xs font-medium border transition-colors ${
+                          val ? 'border-blue-500 bg-blue-900/40 text-blue-300'
+                              : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'}`}>
+                        Flip {axis}
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+              <section>
+                <div className="section-label mb-2">Scroll Factor</div>
+                <InspectorField label="Factor X" value={scrollFactorX} step={0.1} min={0} max={1} onChange={v => updateField('scrollFactorX', v)} />
+                <InspectorField label="Factor Y" value={scrollFactorY} step={0.1} min={0} max={1} onChange={v => updateField('scrollFactorY', v)} />
+                <div className="flex gap-2 mt-1.5">
+                  {[{ l: 'UI (0)', v: 0 }, { l: 'World (1)', v: 1 }].map(p => (
+                    <button key={p.l}
+                      onClick={() => { updateField('scrollFactorX', p.v); updateField('scrollFactorY', p.v); }}
+                      className={`flex-1 py-1 rounded text-[10px] border transition-colors ${
+                        scrollFactorX === p.v && scrollFactorY === p.v
+                          ? 'border-blue-500 bg-blue-900/40 text-blue-300'
+                          : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'}`}>
+                      {p.l}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-[10px] text-gray-600 mt-1">0 = fixed to camera (UI), 1 = moves with world</div>
+              </section>
+              {texW > 0 && (
+                <section>
+                  <div className="section-label mb-2">Display Size</div>
+                  <InspectorField label="Width (px)" value={round2(scaleX * texW)} step={1} min={1}
+                    onChange={v => updateField('scaleX', round2(v / texW))} />
+                  <InspectorField label="Height (px)" value={round2(scaleY * texH)} step={1} min={1}
+                    onChange={v => updateField('scaleY', round2(v / texH))} />
+                  <div className="text-[10px] text-gray-600 mt-1">Native: {texW}×{texH}px — edits scale</div>
+                </section>
+              )}
               <button onClick={() => handleDeleteObject(selectedId)}
                 className="w-full py-2 rounded text-xs text-red-400 border border-red-900 hover:bg-red-900/30 transition-colors">
                 🗑 Delete Object
