@@ -13,6 +13,14 @@ export default defineConfig({
       alias: {
         '@renderer': resolve('src/renderer/src')
       }
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          phaser: resolve(__dirname, 'src/renderer/phaser.html')
+        }
+      }
     }
   }
 });
