@@ -30,4 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // VS Code
   openVSCode: (folder: string) => ipcRenderer.invoke('vscode:open', folder),
+
+  // Bridge
+  installBridge: (folder: string) => ipcRenderer.invoke('bridge:install', folder),
 });

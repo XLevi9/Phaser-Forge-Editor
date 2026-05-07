@@ -144,6 +144,7 @@ export default function App() {
     toPhaser({ type: 'SET_LOCKED_IDS', ids: [...lockedIds] });
   }, [lockedIds]);
 
+
   const toggleLocked = useCallback((id: string) => {
     setLockedIds(prev => {
       const next = new Set(prev);
@@ -152,6 +153,26 @@ export default function App() {
     });
     setHierarchy(prev => prev.map(i => i.id === id ? { ...i, locked: !i.locked } : i));
   }, []);
+
+  // Bridge (live mode)
+  type BridgeStatus = 'disconnected' | 'connecting' | 'connected';
+  interface BridgeObject { id: string; name: string; type: string; x: number; y: number; rotation: number; scaleX: number; scaleY: number; alpha: number; visible: boolean; depth: number; originX: number; originY: number; textureKey?: string; text?: string; displayWidth?: number; displayHeight?: number; }
+  interface BridgeScene { key: string; active: boolean; visible: boolean; }
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('disconnected');
+  const [bridgeScenes, setBridgeScenes] = useState<BridgeScene[]>([]);
+  const [activeBridgeScene, setActiveBridgeScene] = useState<string | null>(null);
+  const [bridgeObjects, setBridgeObjects] = useState<BridgeObject[]>([]);
+  const [bridgeSelectedId, setBridgeSelectedId] = useState<string | null>(null);
+  const [bridgeSelected, setBridgeSelected] = useState<BridgeObject | null>(null);
+  const pingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const toGame = useCallback((msg: object) => {
+    iframeRef.current?.contentWindow?.postMessage(msg, '*');
+  }, []);
+
+  const requestBridgeObjects = useCallback((sceneKey: string) => {
+    toGame({ forge: true, type: 'FORGE_GET_OBJECTS', sceneKey });
+  }, [toGame]);
 
   // Dev server
   type DevStatus = 'idle' | 'starting' | 'running' | 'error';
@@ -173,6 +194,28 @@ export default function App() {
     });
     return () => api?.removeDevServerListeners();
   }, []);
+
+  // When game URL changes, reset bridge and start pinging
+  useEffect(() => {
+    setBridgeStatus('disconnected');
+    setBridgeScenes([]);
+    setBridgeObjects([]);
+    setBridgeSelectedId(null);
+    setBridgeSelected(null);
+    if (!devUrl) return;
+    setBridgeStatus('connecting');
+    pingTimerRef.current = setTimeout(() => {
+      toGame({ forge: true, type: 'FORGE_PING' });
+      let attempts = 0;
+      const interval = setInterval(() => {
+        attempts++;
+        toGame({ forge: true, type: 'FORGE_PING' });
+        if (attempts >= 15) clearInterval(interval);
+      }, 2000);
+      pingTimerRef.current = interval as any;
+    }, 1500);
+    return () => { if (pingTimerRef.current) clearInterval(pingTimerRef.current as any); };
+  }, [devUrl]);
 
   const handleRunStop = async () => {
     const api = (window as any).electronAPI;
@@ -227,6 +270,34 @@ export default function App() {
   useEffect(() => {
     const onMsg = (ev: MessageEvent) => {
       const m = ev.data;
+
+      // Bridge messages from live game
+      if (m?.forge) {
+        if (m.type === 'FORGE_READY' || m.type === 'FORGE_PONG') {
+          setBridgeStatus('connected');
+          if (pingTimerRef.current) { clearTimeout(pingTimerRef.current); pingTimerRef.current = null; }
+          toGame({ forge: true, type: 'FORGE_GET_SCENES' });
+        }
+        if (m.type === 'FORGE_SCENES') {
+          setBridgeScenes(m.scenes ?? []);
+          const active = (m.scenes as BridgeScene[]).find(s => s.active)?.key ?? m.scenes?.[0]?.key ?? null;
+          setActiveBridgeScene(active);
+          if (active) requestBridgeObjects(active);
+        }
+        if (m.type === 'FORGE_OBJECTS') {
+          setBridgeObjects(m.objects ?? []);
+          setActiveBridgeScene(m.sceneKey);
+        }
+        if (m.type === 'FORGE_SELECTED') {
+          setBridgeSelected(m.props ?? null);
+          setBridgeSelectedId(m.id ?? null);
+        }
+        if (m.type === 'FORGE_PROP_SET' && bridgeSelected?.id === m.id) {
+          setBridgeSelected(prev => prev ? { ...prev, [m.prop]: m.value } : null);
+        }
+        return;
+      }
+
       if (!m?.type) return;
       switch (m.type) {
         case 'SCENE_READY':
@@ -573,27 +644,98 @@ export default function App() {
       {/* ── Main layout ── */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* ── Hierarchy — also accepts asset drops ── */}
+        {/* ── Hierarchy ── */}
         <div style={{ width: hierarchyW }}
           className={`flex-shrink-0 relative ${isDraggingAsset ? 'ring-1 ring-inset ring-blue-600/40' : ''}`}
           onDragOver={isDraggingAsset ? e => e.preventDefault() : undefined}
           onDrop={isDraggingAsset ? handleDropOnHierarchy : undefined}
         >
-          <HierarchyPanel
-            items={hierarchy} selectedId={selectedId}
-            onSelect={handleSelectObject} onDelete={handleDeleteObject}
-            onDuplicate={handleDuplicateObject} onRename={handleRenameObject}
-            onAddPrimitive={shape => toPhaser({ type: 'ADD_PRIMITIVE', shape })}
-            onToggleVisible={id => {
-              const item = hierarchy.find(i => i.id === id);
-              if (!item) return;
-              const next = !item.visible;
-              setHierarchy(prev => prev.map(i => i.id === id ? { ...i, visible: next } : i));
-              toPhaser({ type: 'SET_PROPERTIES', id, visible: next });
-              if (selectedId === id) store.updateProperties({ visible: next });
-            }}
-            onToggleLocked={id => toggleLocked(id)}
-          />
+          {devUrl ? (
+            /* LIVE MODE — bridge objects */
+            <aside className="flex flex-col border-r border-gray-700 bg-gray-800 h-full overflow-hidden">
+              {/* Bridge status bar */}
+              <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex-1">Hierarchy</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 ${
+                  bridgeStatus === 'connected' ? 'bg-green-900/50 text-green-400' :
+                  bridgeStatus === 'connecting' ? 'bg-yellow-900/50 text-yellow-400' :
+                  'bg-gray-700 text-gray-500'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    bridgeStatus === 'connected' ? 'bg-green-400' :
+                    bridgeStatus === 'connecting' ? 'bg-yellow-400 animate-pulse' : 'bg-gray-500'}`} />
+                  {bridgeStatus}
+                </span>
+              </div>
+              {/* Scene selector */}
+              {bridgeScenes.length > 0 && (
+                <div className="px-2 py-1.5 border-b border-gray-700 flex-shrink-0">
+                  <select value={activeBridgeScene ?? ''} onChange={e => {
+                    setActiveBridgeScene(e.target.value);
+                    requestBridgeObjects(e.target.value);
+                  }} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500">
+                    {bridgeScenes.map(s => (
+                      <option key={s.key} value={s.key}>{s.key}{s.active ? ' ●' : ''}</option>
+                    ))}
+                  </select>
+                  <button onClick={() => activeBridgeScene && requestBridgeObjects(activeBridgeScene)}
+                    className="mt-1 w-full text-[10px] text-gray-600 hover:text-gray-300 transition-colors">↺ Refresh</button>
+                </div>
+              )}
+              {/* Objects list */}
+              <div className="flex-1 overflow-y-auto py-1">
+                {bridgeStatus !== 'connected' ? (
+                  <div className="p-4 text-center">
+                    <p className="text-xs text-gray-500 mb-3 leading-relaxed">
+                      {bridgeStatus === 'connecting' ? 'Connecting to game bridge…' : 'Bridge not detected in game.'}
+                    </p>
+                    {bridgeStatus === 'disconnected' && (
+                      <button onClick={async () => {
+                        if (!projectFolder) return;
+                        const r = await (window as any).electronAPI?.installBridge(projectFolder);
+                        if (r?.ok) alert('phaser-forge-bridge.js installed!\n\nAdd to your game entry point:\nimport \'./phaser-forge-bridge.js\'');
+                      }} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded transition-colors">
+                        Install Bridge
+                      </button>
+                    )}
+                  </div>
+                ) : bridgeObjects.length === 0 ? (
+                  <p className="text-xs text-gray-600 text-center py-6">No objects in scene.</p>
+                ) : (
+                  bridgeObjects.map(obj => (
+                    <div key={obj.id}
+                      onClick={() => {
+                        setBridgeSelectedId(obj.id);
+                        setBridgeSelected(obj);
+                        toGame({ forge: true, type: 'FORGE_SELECT', id: obj.id });
+                      }}
+                      className={`flex items-center gap-2 px-3 py-1.5 mx-1 rounded text-xs cursor-pointer transition-colors ${
+                        bridgeSelectedId === obj.id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-700/60 hover:text-gray-200'}`}>
+                      <span className="opacity-50 truncate max-w-16">{obj.type}</span>
+                      <span className="truncate flex-1">{obj.name || obj.id}</span>
+                      <span className="text-[9px] text-gray-600 font-mono">{Math.round(obj.x)},{Math.round(obj.y)}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </aside>
+          ) : (
+            /* DESIGN MODE — our scene objects */
+            <HierarchyPanel
+              items={hierarchy} selectedId={selectedId}
+              onSelect={handleSelectObject} onDelete={handleDeleteObject}
+              onDuplicate={handleDuplicateObject} onRename={handleRenameObject}
+              onAddPrimitive={shape => toPhaser({ type: 'ADD_PRIMITIVE', shape })}
+              onToggleVisible={id => {
+                const item = hierarchy.find(i => i.id === id);
+                if (!item) return;
+                const next = !item.visible;
+                setHierarchy(prev => prev.map(i => i.id === id ? { ...i, visible: next } : i));
+                toPhaser({ type: 'SET_PROPERTIES', id, visible: next });
+                if (selectedId === id) store.updateProperties({ visible: next });
+              }}
+              onToggleLocked={id => toggleLocked(id)}
+            />
+          )}
           {isDraggingAsset && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <span className="text-[10px] text-blue-400 bg-gray-900/80 px-2 py-1 rounded">Drop to add at center</span>
@@ -642,10 +784,55 @@ export default function App() {
           className={`w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent `} />
         {/* ── Inspector ── */}
         <aside style={{ width: inspectorW }} className="flex-shrink-0 flex flex-col border-l border-gray-700 bg-gray-800 overflow-y-auto">
-          <div className="px-3 py-2 border-b border-gray-700">
+          <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
             <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Inspector</span>
+            {devUrl && <span className="text-[10px] text-green-600 font-medium">LIVE</span>}
           </div>
-          {selectedId ? (
+
+          {/* LIVE MODE inspector — bridge selected object */}
+          {devUrl && bridgeSelected && (
+            <div className="p-3 space-y-4 text-sm">
+              <div className="bg-gray-900 rounded px-3 py-2">
+                <div className="text-[10px] text-gray-500 mb-0.5">Type / Name</div>
+                <div className="text-xs text-white font-mono truncate">{bridgeSelected.type} — {bridgeSelected.name || bridgeSelected.id}</div>
+                {bridgeSelected.textureKey && <div className="text-[10px] text-gray-500 mt-0.5">Texture: {bridgeSelected.textureKey}</div>}
+              </div>
+              <section>
+                <div className="section-label mb-2">Position</div>
+                <InspectorField label="X" value={Math.round(bridgeSelected.x)} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, x: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'x', value: v }); }} />
+                <InspectorField label="Y" value={Math.round(bridgeSelected.y)} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, y: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'y', value: v }); }} />
+                {bridgeSelected.displayWidth !== undefined && <div className="text-[10px] text-gray-600 text-right">display: {bridgeSelected.displayWidth}×{bridgeSelected.displayHeight}px</div>}
+              </section>
+              <section>
+                <div className="section-label mb-2">Rotation</div>
+                <InspectorField label="Angle (rad)" value={round2(bridgeSelected.rotation)} step={0.01} onChange={v => { setBridgeSelected(p => p ? { ...p, rotation: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'rotation', value: v }); }} />
+                <div className="text-[10px] text-gray-600 text-right -mt-1">{Math.round((bridgeSelected.rotation * 180) / Math.PI)}°</div>
+              </section>
+              <section>
+                <div className="section-label mb-2">Scale</div>
+                <InspectorField label="Scale X" value={round2(bridgeSelected.scaleX)} step={0.01} min={0} onChange={v => { setBridgeSelected(p => p ? { ...p, scaleX: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'scaleX', value: v }); }} />
+                <InspectorField label="Scale Y" value={round2(bridgeSelected.scaleY)} step={0.01} min={0} onChange={v => { setBridgeSelected(p => p ? { ...p, scaleY: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'scaleY', value: v }); }} />
+              </section>
+              <section>
+                <div className="section-label mb-2">Appearance</div>
+                <InspectorField label="Alpha" value={round2(bridgeSelected.alpha)} step={0.01} min={0} max={1} onChange={v => { setBridgeSelected(p => p ? { ...p, alpha: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'alpha', value: v }); }} />
+                <InspectorField label="Depth" value={bridgeSelected.depth} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, depth: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'depth', value: v }); }} />
+                <InspectorField label="Visible" value={bridgeSelected.visible} type="checkbox" onChange={v => { setBridgeSelected(p => p ? { ...p, visible: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'visible', value: v }); }} />
+              </section>
+            </div>
+          )}
+
+          {devUrl && !bridgeSelected && (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+              <div className="text-4xl mb-3 opacity-20">🎮</div>
+              <p className="text-xs text-gray-500 leading-relaxed">
+                {bridgeStatus === 'connected' ? 'Click an object in the hierarchy.' : 'Waiting for bridge connection…'}
+              </p>
+            </div>
+          )}
+
+          {/* DESIGN MODE inspector */}
+          {!devUrl && selectedId ? (
             <div className="p-3 space-y-4 text-sm">
               <div className="bg-gray-900 rounded px-3 py-2">
                 <div className="text-[10px] text-gray-500 mb-0.5">ID</div>

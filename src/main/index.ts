@@ -97,6 +97,120 @@ app.whenReady().then(() => {
     exec(`code "${folder}"`);
   });
 
+  // ── Bridge: install phaser-forge-bridge.js to project ───────────────────
+  ipcMain.handle('bridge:install', async (_e, folder: string) => {
+    const bridgeCode = `// phaser-forge-bridge.js — Phaser Forge Editor Bridge v0.2
+// Add to your game entry point:  import './phaser-forge-bridge.js'
+// Docs: github.com/XLevi9/Phaser-Forge-Editor
+
+if (window.parent !== window) {
+  let _idCounter = 0;
+  const _objMap = new Map();
+
+  function ensureId(obj) {
+    if (!obj.__forgeId) {
+      obj.__forgeId = 'forge_' + (_idCounter++);
+      _objMap.set(obj.__forgeId, obj);
+    }
+    return obj.__forgeId;
+  }
+
+  function getProps(obj) {
+    const p = {
+      id: ensureId(obj),
+      name: obj.name || '',
+      type: obj.type || obj.constructor?.name || 'Unknown',
+      x: obj.x ?? 0, y: obj.y ?? 0,
+      rotation: obj.rotation ?? 0,
+      scaleX: obj.scaleX ?? 1, scaleY: obj.scaleY ?? 1,
+      alpha: obj.alpha ?? 1,
+      visible: obj.visible ?? true,
+      depth: obj.depth ?? 0,
+      originX: obj.originX ?? 0.5, originY: obj.originY ?? 0.5,
+    };
+    if (obj.texture?.key && obj.texture.key !== '__DEFAULT' && obj.texture.key !== '__MISSING')
+      p.textureKey = obj.texture.key;
+    if (typeof obj.text === 'string') p.text = obj.text;
+    if (obj.displayWidth) p.displayWidth = Math.round(obj.displayWidth);
+    if (obj.displayHeight) p.displayHeight = Math.round(obj.displayHeight);
+    return p;
+  }
+
+  function getGame() {
+    return window.game || window.__phaserGame ||
+      Object.values(window).find(v => v?.constructor?.name === 'Game');
+  }
+
+  window.addEventListener('message', (ev) => {
+    if (!ev.data?.forge) return;
+    const m = ev.data;
+    const game = getGame();
+
+    if (m.type === 'FORGE_PING') {
+      window.parent.postMessage({ forge: true, type: 'FORGE_PONG', version: '0.2' }, '*');
+    }
+
+    if (m.type === 'FORGE_GET_SCENES') {
+      if (!game) return;
+      const scenes = game.scene.scenes
+        .filter(s => s.sys.settings.status > 0)
+        .map(s => ({
+          key: s.sys.settings.key,
+          active: s.sys.isActive(),
+          visible: s.sys.isVisible(),
+        }));
+      window.parent.postMessage({ forge: true, type: 'FORGE_SCENES', scenes }, '*');
+    }
+
+    if (m.type === 'FORGE_GET_OBJECTS') {
+      if (!game) return;
+      const scene = game.scene.getScene(m.sceneKey);
+      if (!scene) return;
+      const objects = scene.children.list
+        .filter(obj => !obj.__forgeInternal && obj.active !== false)
+        .map(getProps);
+      window.parent.postMessage({ forge: true, type: 'FORGE_OBJECTS', sceneKey: m.sceneKey, objects }, '*');
+    }
+
+    if (m.type === 'FORGE_SET_PROP') {
+      const obj = _objMap.get(m.id);
+      if (!obj) return;
+      const v = m.value;
+      const prop = m.prop;
+      if (prop === 'x')        obj.x = v;
+      else if (prop === 'y')   obj.y = v;
+      else if (prop === 'rotation') obj.rotation = v;
+      else if (prop === 'scaleX')   obj.scaleX = v;
+      else if (prop === 'scaleY')   obj.scaleY = v;
+      else if (prop === 'alpha')    obj.alpha = v;
+      else if (prop === 'visible')  obj.visible = v;
+      else if (prop === 'depth')    obj.setDepth?.(v);
+      window.parent.postMessage({ forge: true, type: 'FORGE_PROP_SET', id: m.id, prop, value: v }, '*');
+    }
+
+    if (m.type === 'FORGE_SELECT') {
+      const obj = _objMap.get(m.id);
+      if (!obj) return;
+      let bounds = { x: obj.x, y: obj.y, width: obj.displayWidth ?? 0, height: obj.displayHeight ?? 0 };
+      try { const b = obj.getBounds?.(); if (b) bounds = b; } catch (_) {}
+      window.parent.postMessage({ forge: true, type: 'FORGE_SELECTED', id: m.id, props: getProps(obj), bounds }, '*');
+    }
+  });
+
+  // Announce when ready
+  const _announce = () => window.parent.postMessage({ forge: true, type: 'FORGE_READY' }, '*');
+  if (document.readyState === 'complete') setTimeout(_announce, 800);
+  else window.addEventListener('load', () => setTimeout(_announce, 800));
+}
+`;
+    try {
+      fs.writeFileSync(path.join(folder, 'phaser-forge-bridge.js'), bridgeCode);
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
+  });
+
   // ── fs: scan assets ───────────────────────────────────────────────────────
   ipcMain.handle('fs:readAssets', async (_e, folderPath: string) => {
     const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
