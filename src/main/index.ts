@@ -45,18 +45,20 @@ app.whenReady().then(() => {
   ipcMain.handle('devserver:start', async (_e, folder: string) => {
     if (devProc) { devProc.kill(); devProc = null; }
 
+    // Strip ANSI escape codes for clean display and regex matching
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[mGKHF]/g, '');
+
     return new Promise<{ ok: boolean; url?: string; error?: string }>(resolve => {
       let resolved = false;
 
       devProc = spawn('npm', ['run', 'dev'], { cwd: folder, shell: true });
 
       const handleData = (data: Buffer) => {
-        const text = data.toString();
-        mainWin?.webContents.send('devserver:output', text);
+        const clean = stripAnsi(data.toString());
+        mainWin?.webContents.send('devserver:output', clean);
 
         if (!resolved) {
-          // Detect Vite / common bundler local URL
-          const m = text.match(/https?:\/\/localhost:(\d+)/);
+          const m = clean.match(/https?:\/\/localhost:(\d+)/);
           if (m) {
             const url = `http://localhost:${m[1]}`;
             resolved = true;
