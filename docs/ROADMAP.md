@@ -4,7 +4,7 @@
 
 **Last updated:** 2026-05-07  
 **Current branch:** `feature/game-engine-core`  
-**Current version:** v0.1.0
+**Current version:** v0.2.1-dev
 
 ---
 
@@ -64,33 +64,40 @@
 
 > **Goal:** Editor bisa terhubung ke game Phaser 4 user yang sedang running. Yang terlihat di viewport = game asli, bukan placeholder.
 
-### 0.2.1 — Dev Server Integration
-- [ ] Tombol "Run" di toolbar → editor spawn `npm run dev` di project folder
-- [ ] Detect port dari output Vite (parse "Local: http://localhost:XXXX")
-- [ ] Viewport iframe load `localhost:PORT` (bukan `phaser.html` kita)
-- [ ] Terminal panel kecil di editor untuk lihat output dev server
-- [ ] Stop dev server saat editor ditutup atau project diganti
+### 0.2.1 — Dev Server Integration ✅ SELESAI
+- [x] Tombol "Run" di toolbar → editor spawn `npm run dev` di project folder
+- [x] Detect port dari output Vite — strip ANSI codes sebelum regex match
+- [x] Viewport iframe switch ke `localhost:PORT` saat server ready
+- [x] Console tab di footer — stream output dev server real-time dengan auto-scroll
+- [x] Stop dev server (button + saat app quit — tidak ada orphan process)
+- [x] LIVE badge di viewport saat game berjalan
+- [x] VS Code button — `code [projectFolder]`
+- [x] `webSecurity: false` agar iframe bisa load localhost dari file:// protocol
 
 ### 0.2.2 — Editor Bridge SDK
-- [ ] Buat file `phaser-forge-bridge.js` (satu file, ~100 baris)
-- [ ] User import bridge ini ke game mereka (satu baris)
-- [ ] Bridge protocol via `window.postMessage`:
-  - `GET_SCENE_OBJECTS` → bridge scan `scene.children.list` → kirim ke editor
-  - `SELECT_OBJECT` → bridge highlight + return full props
-  - `SET_PROPERTIES` → bridge update object live
-  - `GET_SCENES` → list semua registered scenes
-  - `SWITCH_SCENE` → bridge pindah scene aktif
+> Agar editor bisa "baca" dan "kontrol" object dari game Phaser yang running.
+- [ ] Buat `phaser-forge-bridge.js` — satu file yang user tambahkan ke game mereka
+- [ ] Bridge scan `scene.children.list` saat diminta
+- [ ] Protocol postMessage dua arah:
+  - `GET_SCENE_OBJECTS` → bridge kirim list semua object + props
+  - `SELECT_OBJECT (id)` → bridge highlight object, kirim full props
+  - `SET_PROPERTY (id, key, value)` → bridge update object live
+  - `GET_SCENES` → list semua scene yang terdaftar
+  - `SWITCH_SCENE (key)` → pindah ke scene lain
+- [ ] Hierarchy panel populate dari data bridge (bukan list manual kita)
+- [ ] Inspector panel terhubung ke object game asli
 
 ### 0.2.3 — Visual Overlay
-- [ ] Overlay canvas transparan di atas iframe (tidak block game input saat play mode)
-- [ ] Selection box rendered di overlay (bukan di dalam game)
-- [ ] Gizmo handles di overlay (move, rotate, scale)
-- [ ] Click detection: overlay detect klik → tanya bridge object apa yang ada di titik itu
+> Gizmos di atas game yang running — bukan di dalam game.
+- [ ] Canvas transparan overlay di atas iframe game
+- [ ] Click di overlay → tanya bridge object apa di titik itu → select
+- [ ] Selection box di overlay (tidak memodifikasi game)
+- [ ] Move gizmo → drag di overlay → kirim SET_PROPERTY position ke bridge
 
-### 0.2.4 — VS Code Integration
-- [ ] Tombol "Open VS Code" di toolbar → spawn `code [projectFolder]`
-- [ ] File watcher → detect perubahan file → Vite HMR sudah handle reload otomatis
-- [ ] Status indicator: "Hot reload detected" di editor
+### 0.2.4 — Scene Awareness
+- [ ] Editor tau scene mana yang aktif
+- [ ] Switch scene dari hierarchy
+- [ ] Hierarchy refresh otomatis saat scene berubah (scene-transition aware)
 
 ---
 
