@@ -156,6 +156,18 @@ export default function App() {
   // Drag overlay
   const [isDraggingAsset, setIsDraggingAsset] = useState(false);
 
+  // Save state
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
+  const pendingSaveRef = useRef(false);
+  const pendingLoadFolderRef = useRef<string | null>(null);
+  const hierarchyRef = useRef<HierarchyItem[]>([]);
+  const projectFolderRef = useRef<string | null>(null);
+  useEffect(() => { projectFolderRef.current = projectFolder; }, [projectFolder]);
+  useEffect(() => {
+    hierarchyRef.current = hierarchy;
+    if (hierarchy.length > 0) setSaveStatus('unsaved');
+  }, [hierarchy]);
+
   const iframeSrc = `/phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
 
   const toPhaser = useCallback((msg: object) => {
@@ -174,7 +186,13 @@ export default function App() {
       if (!m?.type) return;
       switch (m.type) {
         case 'SCENE_READY':
-          setHierarchy((m.hierarchy ?? []).map((i: any) => ({ ...i, visible: true, locked: false }))); break;
+          setHierarchy((m.hierarchy ?? []).map((i: any) => ({ ...i, visible: true, locked: false })));
+          if (pendingLoadFolderRef.current) {
+            const f = pendingLoadFolderRef.current;
+            pendingLoadFolderRef.current = null;
+            loadSceneFromFile(f);
+          }
+          break;
         case 'OBJECT_SELECTED':
           store.setSelectedObject(m.id, {
             x: round2(m.x ?? 0), y: round2(m.y ?? 0),
@@ -217,6 +235,23 @@ export default function App() {
           if (useEditorStore.getState().selectedId === m.id) store.setSelectedObject(null); break;
         case 'OBJECT_RENAMED':
           setHierarchy(prev => prev.map(i => i.id === m.id ? { ...i, name: m.name } : i)); break;
+        case 'SCENE_STATE': {
+          if (!pendingSaveRef.current) break;
+          pendingSaveRef.current = false;
+          setSaveStatus('saving');
+          const folder = projectFolderRef.current;
+          if (!folder) { setSaveStatus('unsaved'); break; }
+          (async () => {
+            const hier = hierarchyRef.current;
+            const objects = (m.objects as any[]).map(obj => ({
+              ...obj,
+              name: hier.find(h => h.id === obj.id)?.name ?? obj.name,
+            }));
+            const saved = await (window as any).electronAPI?.saveScene(folder, objects);
+            setSaveStatus(saved ? 'saved' : 'unsaved');
+          })();
+          break;
+        }
       }
     };
     window.addEventListener('message', onMsg);
@@ -227,6 +262,14 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement) return;
+      if (e.ctrlKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (projectFolderRef.current) {
+          pendingSaveRef.current = true;
+          toPhaser({ type: 'GET_SCENE_STATE' });
+        }
+        return;
+      }
       if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         const entry = useEditorStore.getState().undo();
@@ -283,16 +326,40 @@ export default function App() {
     window.addEventListener('mouseup', onUp);
   };
 
+  // Save
+  const handleSave = () => {
+    if (!projectFolder) return;
+    pendingSaveRef.current = true;
+    toPhaser({ type: 'GET_SCENE_STATE' });
+  };
+
+  // Load scene from file into phaser
+  const loadSceneFromFile = async (folder: string) => {
+    const data = await (window as any).electronAPI?.loadScene(folder);
+    if (!data?.objects?.length) return;
+    const objects = await Promise.all(data.objects.map(async (obj: any) => {
+      if (obj.kind !== 'sprite' || !obj.assetFullPath) return obj;
+      const dataUrl = await (window as any).electronAPI?.fileToDataUrl(obj.assetFullPath);
+      return { ...obj, dataUrl: dataUrl ?? '' };
+    }));
+    toPhaser({ type: 'LOAD_SCENE', objects });
+    setSaveStatus('saved');
+  };
+
   // Open project
   const handleOpenProject = async () => {
     const folder = await (window as any).electronAPI?.openFolder();
     if (!folder) return;
     const config = await (window as any).electronAPI?.readProjectConfig(folder);
     if (config?.canvasWidth && config?.canvasHeight) {
+      const sizeChanged = config.canvasWidth !== canvasSize.w || config.canvasHeight !== canvasSize.h;
       setProjectFolder(folder);
       setCanvasSize({ w: config.canvasWidth, h: config.canvasHeight });
       setHierarchy([]);
       store.setSelectedObject(null);
+      pendingLoadFolderRef.current = folder;
+      if (!sizeChanged) toPhaser({ type: 'RESET_SCENE' });
+      // if sizeChanged: iframe reloads → SCENE_READY fires → load triggered there
     } else {
       setSetupDialog({ show: true, pending: folder });
     }
@@ -306,6 +373,7 @@ export default function App() {
     setHierarchy([]);
     store.setSelectedObject(null);
     setSetupDialog({ show: false, pending: null });
+    pendingLoadFolderRef.current = folder;
   };
 
   // Hierarchy actions
@@ -375,6 +443,7 @@ export default function App() {
   const handleIframeLoad = () => {
     toPhaser({ type: 'SET_TOOL_MODE', mode: toolMode });
     toPhaser({ type: 'SET_SNAP', enabled: store.snapEnabled });
+    toPhaser({ type: 'SET_LOCKED_IDS', ids: [...lockedIds] });
   };
 
   const { selectedId, x, y, rotation, scaleX, scaleY, alpha, tint, visible, depth, originX, originY, flipX, flipY, scrollFactorX, scrollFactorY, texW, texH, snapEnabled, past, future } = store;
@@ -435,8 +504,11 @@ export default function App() {
 
         <div className="flex-1" />
         {past.length > 0 && <span className="text-xs text-gray-700 hidden xl:block mr-2">{past.length} action{past.length !== 1 ? 's' : ''}</span>}
+        {saveStatus === 'unsaved' && <span className="text-[10px] text-yellow-600 hidden xl:block">unsaved</span>}
+        {saveStatus === 'saving'  && <span className="text-[10px] text-gray-500 hidden xl:block">saving…</span>}
+        {saveStatus === 'saved'   && <span className="text-[10px] text-gray-700 hidden xl:block">saved</span>}
         <ToolBtn icon="▶" label="Play" onClick={() => {}} extra="text-green-400" />
-        <ToolBtn icon="💾" label="Save" onClick={() => {}} />
+        <ToolBtn icon="💾" label="Save (Ctrl+S)" onClick={handleSave} disabled={!projectFolder} />
       </header>
 
       {/* ── Main layout ── */}

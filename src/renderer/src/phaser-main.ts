@@ -10,6 +10,7 @@ const HANDLE_SZ = 14;
 
 class EditorScene extends Phaser.Scene {
   private sprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private spriteData: Map<string, { kind: string; name: string; shape?: string; assetName?: string; assetFullPath?: string }> = new Map();
 
   private selectedSprite: Phaser.GameObjects.Sprite | null = null;
   private selectedId: string | null = null;
@@ -198,6 +199,14 @@ class EditorScene extends Phaser.Scene {
       if (m.type === 'SET_SNAP') this.snapOn = m.enabled;
       if (m.type === 'SET_LOCKED_IDS') this.lockedIds = new Set(m.ids as string[]);
 
+      if (m.type === 'RESET_SCENE') {
+        this.deselect();
+        for (const [, spr] of this.sprites) spr.destroy();
+        this.sprites.clear();
+        this.spriteData.clear();
+        window.parent.postMessage({ type: 'SCENE_READY', hierarchy: [] }, '*');
+      }
+
       if (m.type === 'RESET_CAMERA') {
         this.cameras.main.setScroll(0, 0);
         this.cameras.main.setZoom(1);
@@ -235,6 +244,7 @@ class EditorScene extends Phaser.Scene {
           if (this.selectedSprite === s) this.deselect();
           s.destroy();
           this.sprites.delete(m.id);
+          this.spriteData.delete(m.id);
         }
       }
 
@@ -256,7 +266,74 @@ class EditorScene extends Phaser.Scene {
       }
 
       if (m.type === 'RENAME_OBJECT') {
+        const d = this.spriteData.get(m.id);
+        if (d) d.name = m.name;
         window.parent.postMessage({ type: 'OBJECT_RENAMED', id: m.id, name: m.name }, '*');
+      }
+
+      if (m.type === 'GET_SCENE_STATE') {
+        const objects: object[] = [];
+        for (const [id, spr] of this.sprites) {
+          const d = this.spriteData.get(id) ?? { kind: 'sprite', name: id };
+          objects.push({
+            id, name: d.name, kind: d.kind,
+            shape: d.shape, assetName: d.assetName, assetFullPath: d.assetFullPath,
+            x: spr.x, y: spr.y, rotation: spr.rotation,
+            scaleX: spr.scaleX, scaleY: spr.scaleY,
+            alpha: spr.alpha, visible: spr.visible, depth: spr.depth,
+            originX: spr.originX, originY: spr.originY,
+            flipX: spr.flipX, flipY: spr.flipY,
+            scrollFactorX: spr.scrollFactorX, scrollFactorY: spr.scrollFactorY,
+            tint: '#' + (spr.tintTopLeft || 0xffffff).toString(16).padStart(6, '0'),
+          });
+        }
+        window.parent.postMessage({ type: 'SCENE_STATE', objects }, '*');
+      }
+
+      if (m.type === 'LOAD_SCENE') {
+        this.deselect();
+        for (const [, spr] of this.sprites) spr.destroy();
+        this.sprites.clear();
+        this.spriteData.clear();
+        window.parent.postMessage({ type: 'SCENE_READY', hierarchy: [] }, '*');
+
+        for (const obj of m.objects as any[]) {
+          if (obj.kind === 'primitive') {
+            const key = `prim_${obj.shape}`;
+            if (!this.textures.exists(key)) {
+              const sz = 64;
+              const g = this.add.graphics();
+              g.fillStyle(0xffffff, 1);
+              g.lineStyle(2, 0xffffff, 0.3);
+              if (obj.shape === 'rect')     { g.fillRect(2, 2, sz-4, sz-4); g.strokeRect(2, 2, sz-4, sz-4); }
+              if (obj.shape === 'circle')   { g.fillCircle(sz/2, sz/2, sz/2-2); g.strokeCircle(sz/2, sz/2, sz/2-2); }
+              if (obj.shape === 'triangle') { g.fillTriangle(sz/2, 2, sz-2, sz-2, 2, sz-2); g.strokeTriangle(sz/2, 2, sz-2, sz-2, 2, sz-2); }
+              g.generateTexture(key, sz, sz);
+              g.destroy();
+            }
+            const spr = this.add.sprite(obj.x, obj.y, key);
+            this.applyProps(spr, obj);
+            this.sprites.set(obj.id, spr);
+            this.spriteData.set(obj.id, { kind: 'primitive', shape: obj.shape, name: obj.name });
+            const typeMap: Record<string, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
+            window.parent.postMessage({ type: 'OBJECT_ADDED', id: obj.id, name: obj.name, objType: typeMap[obj.shape] ?? 'Rect' }, '*');
+          } else if (obj.kind === 'sprite') {
+            const key = `asset_${obj.assetName}`;
+            const doAdd = () => {
+              const spr = this.add.sprite(obj.x, obj.y, key);
+              this.applyProps(spr, obj);
+              this.sprites.set(obj.id, spr);
+              this.spriteData.set(obj.id, { kind: 'sprite', name: obj.name, assetName: obj.assetName, assetFullPath: obj.assetFullPath });
+              window.parent.postMessage({ type: 'OBJECT_ADDED', id: obj.id, name: obj.name, objType: 'Sprite' }, '*');
+            };
+            if (this.textures.exists(key)) {
+              doAdd();
+            } else if (obj.dataUrl) {
+              this.textures.once('addtexture-' + key, doAdd);
+              this.textures.addBase64(key, obj.dataUrl);
+            }
+          }
+        }
       }
 
       if (m.type === 'ADD_PRIMITIVE') {
@@ -286,6 +363,7 @@ class EditorScene extends Phaser.Scene {
         this.sprites.set(id, spr);
         const names: Record<string, string> = { rect: 'Rectangle', circle: 'Circle', triangle: 'Triangle' };
         const types: Record<string, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
+        this.spriteData.set(id, { kind: 'primitive', shape, name: names[shape] });
         window.parent.postMessage({ type: 'OBJECT_ADDED', id, name: names[shape], objType: types[shape] }, '*');
         this.selectSprite(id, spr);
       }
@@ -298,6 +376,7 @@ class EditorScene extends Phaser.Scene {
           spr.setInteractive({ draggable: true });
           const id = `${file.name}_${Date.now()}`;
           this.sprites.set(id, spr);
+          this.spriteData.set(id, { kind: 'sprite', name: file.name, assetName: file.name, assetFullPath: file.fullPath ?? '' });
           window.parent.postMessage({ type: 'OBJECT_ADDED', id, name: file.name, objType: 'Sprite' }, '*');
           this.selectSprite(id, spr);
         };
@@ -425,6 +504,19 @@ class EditorScene extends Phaser.Scene {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
+  private applyProps(spr: Phaser.GameObjects.Sprite, obj: any) {
+    spr.setInteractive({ draggable: true });
+    spr.setRotation(obj.rotation ?? 0);
+    spr.setScale(obj.scaleX ?? 1, obj.scaleY ?? 1);
+    spr.setAlpha(obj.alpha ?? 1);
+    spr.setVisible(obj.visible ?? true);
+    spr.setDepth(obj.depth ?? 0);
+    spr.setOrigin(obj.originX ?? 0.5, obj.originY ?? 0.5);
+    spr.setFlip(obj.flipX ?? false, obj.flipY ?? false);
+    spr.setScrollFactor(obj.scrollFactorX ?? 1, obj.scrollFactorY ?? 1);
+    if (obj.tint) spr.setTint(parseInt(obj.tint.replace('#', ''), 16));
+  }
+
   private snap(v: number) {
     return this.snapOn ? Math.round(v / this.SNAP) * this.SNAP : v;
   }

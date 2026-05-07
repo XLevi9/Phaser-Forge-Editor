@@ -70,6 +70,22 @@ app.whenReady().then(() => {
     return scanDir(scanRoot, scanRoot);
   });
 
+  // IPC: save / load scene
+  ipcMain.handle('scene:save', async (_e, folderPath: string, objects: object[]) => {
+    try {
+      fs.writeFileSync(path.join(folderPath, 'forge-scene.json'), JSON.stringify({ version: 1, objects }, null, 2));
+      return true;
+    } catch { return false; }
+  });
+
+  ipcMain.handle('scene:load', async (_e, folderPath: string) => {
+    try {
+      const p = path.join(folderPath, 'forge-scene.json');
+      if (!fs.existsSync(p)) return null;
+      return JSON.parse(fs.readFileSync(p, 'utf-8'));
+    } catch { return null; }
+  });
+
   // IPC: read .phaser-forge.json from project folder
   ipcMain.handle('project:readConfig', async (_e, folderPath: string) => {
     try {

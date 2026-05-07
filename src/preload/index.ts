@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fileToDataUrl: (path: string) => ipcRenderer.invoke('fs:fileToDataUrl', path),
   readProjectConfig: (folder: string) => ipcRenderer.invoke('project:readConfig', folder),
   writeProjectConfig: (folder: string, cfg: object) => ipcRenderer.invoke('project:writeConfig', folder, cfg),
+  saveScene: (folder: string, objects: object[]) => ipcRenderer.invoke('scene:save', folder, objects),
+  loadScene: (folder: string) => ipcRenderer.invoke('scene:load', folder),
 });
