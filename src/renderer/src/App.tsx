@@ -1,55 +1,564 @@
-import React from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { useEditorStore, ObjectProps } from './store';
+import HierarchyPanel, { HierarchyItem } from './components/HierarchyPanel';
+import AssetBrowser from './components/AssetBrowser';
 
-function App() {
+type ToolMode = 'select' | 'move' | 'rotate' | 'scale';
+const round2 = (n: number) => Math.round(n * 100) / 100;
+const MIN_PANEL_H = 72;
+const MAX_PANEL_H = 480;
+const DEFAULT_PANEL_H = 180;
+
+// InspectorField
+interface FieldProps {
+  label: string; value: number | string | boolean;
+  type?: 'number' | 'color' | 'checkbox'; min?: number; max?: number; step?: number;
+  onChange: (v: any) => void;
+}
+function InspectorField({ label, value, type = 'number', min, max, step = 0.01, onChange }: FieldProps) {
+  if (type === 'checkbox') return (
+    <div className="flex items-center justify-between py-1">
+      <span className="text-xs text-gray-400 w-28">{label}</span>
+      <input type="checkbox" checked={value as boolean} onChange={e => onChange(e.target.checked)}
+        className="accent-blue-500 w-4 h-4" />
+    </div>
+  );
+  if (type === 'color') return (
+    <div className="flex items-center justify-between py-1">
+      <span className="text-xs text-gray-400 w-28">{label}</span>
+      <input type="color" value={value as string} onChange={e => onChange(e.target.value)}
+        className="w-10 h-7 rounded border border-gray-600 bg-transparent cursor-pointer" />
+    </div>
+  );
   return (
-    <div className="flex h-screen w-screen flex-col bg-gray-900 text-white">
-      {/* Toolbar */}
-      <div className="flex h-12 items-center border-b border-gray-700 bg-gray-800 px-4">
-        <h1 className="text-lg font-bold">Phaser Forge</h1>
-      </div>
+    <div className="flex items-center justify-between py-1">
+      <span className="text-xs text-gray-400 w-28">{label}</span>
+      <input type="number" value={value as number} min={min} max={max} step={step}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs text-right focus:outline-none focus:border-blue-500" />
+    </div>
+  );
+}
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Hierarchy */}
-        <div className="w-64 border-r border-gray-700 bg-gray-800 p-4">
-          <h2 className="mb-2 font-semibold text-gray-400 text-sm uppercase">Hierarchy</h2>
-          <div className="text-sm">Scene</div>
-        </div>
+// ToolBtn
+function ToolBtn({ icon, label, active, onClick, disabled, extra = '' }:
+  { icon: string; label: string; active?: boolean; onClick: () => void; disabled?: boolean; extra?: string }) {
+  return (
+    <button title={label} onClick={onClick} disabled={disabled}
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
+        active ? 'bg-blue-600 text-white shadow-[0_0_10px_rgba(59,130,246,0.4)]'
+          : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+      } ${extra}`}>
+      <span>{icon}</span><span className="hidden xl:inline">{label}</span>
+    </button>
+  );
+}
 
-        {/* Viewport */}
-        <div className="flex-1 bg-gray-950 flex flex-col relative">
-          {/* WebView will go here */}
-          <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-            Viewport (Phaser 4)
+// SetupDialog
+function SetupDialog({ onConfirm, onCancel }: {
+  onConfirm: (w: number, h: number) => void; onCancel: () => void;
+}) {
+  const [w, setW] = useState(1280);
+  const [h, setH] = useState(720);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      <div className="bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-6 w-80">
+        <h2 className="text-sm font-semibold text-white mb-1">Project Canvas Size</h2>
+        <p className="text-xs text-gray-400 mb-5 leading-relaxed">
+          Match the size to your Phaser game config.<br />
+          Check <span className="text-gray-300 font-mono">GAME_WIDTH</span> / <span className="text-gray-300 font-mono">GAME_HEIGHT</span> in your constants.
+        </p>
+        <div className="space-y-3 mb-5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-400">Width (px)</span>
+            <input type="number" value={w} onChange={e => setW(parseInt(e.target.value) || 1280)} min={100} max={7680}
+              className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-right text-white focus:outline-none focus:border-blue-500" />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-400">Height (px)</span>
+            <input type="number" value={h} onChange={e => setH(parseInt(e.target.value) || 720)} min={100} max={4320}
+              className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-right text-white focus:outline-none focus:border-blue-500" />
+          </div>
+          <div className="flex gap-2 flex-wrap pt-1">
+            {[{ l: '1280×720', w: 1280, h: 720 }, { l: '960×540', w: 960, h: 540 }, { l: '800×600', w: 800, h: 600 }].map(p => (
+              <button key={p.l} onClick={() => { setW(p.w); setH(p.h); }}
+                className="px-2 py-0.5 rounded text-[10px] border border-gray-600 text-gray-400 hover:border-blue-500 hover:text-blue-300 transition-colors">
+                {p.l}
+              </button>
+            ))}
           </div>
         </div>
-
-        {/* Inspector */}
-        <div className="w-72 border-l border-gray-700 bg-gray-800 p-4">
-          <h2 className="mb-4 font-semibold text-gray-400 text-sm uppercase">Inspector</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Transform</label>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500 w-4">X</span>
-                  <input type="number" className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500 w-4">Y</span>
-                  <input type="number" className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1" />
-                </div>
-              </div>
-            </div>
-          </div>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-3 py-1.5 rounded text-xs text-gray-400 hover:bg-gray-700 transition-colors">Cancel</button>
+          <button onClick={() => onConfirm(w, h)} className="px-4 py-1.5 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors">Open Project</button>
         </div>
-      </div>
-      
-      {/* Assets Browser */}
-      <div className="h-48 border-t border-gray-700 bg-gray-800 p-4">
-        <h2 className="mb-2 font-semibold text-gray-400 text-sm uppercase">Assets</h2>
       </div>
     </div>
   );
 }
 
-export default App;
+// App
+export default function App() {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const store = useEditorStore();
+
+  const [hierarchy, setHierarchy] = useState<HierarchyItem[]>([]);
+  const [toolMode, setToolModeState] = useState<ToolMode>('select');
+  const [projectFolder, setProjectFolder] = useState<string | null>(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 1280, h: 720 });
+  const [setupDialog, setSetupDialog] = useState<{ show: boolean; pending: string | null }>({ show: false, pending: null });
+
+  // Asset panel resize
+  const [panelH, setPanelH] = useState(DEFAULT_PANEL_H);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const resizingRef = useRef(false);
+  const resizeStartRef = useRef({ y: 0, h: 0 });
+
+  // Drag overlay — shown over iframe while user is dragging an asset
+  const [isDraggingAsset, setIsDraggingAsset] = useState(false);
+
+  const iframeSrc = `/phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
+
+  const toPhaser = useCallback((msg: object) => {
+    iframeRef.current?.contentWindow?.postMessage(msg, '*');
+  }, []);
+
+  const setTool = useCallback((mode: ToolMode) => {
+    setToolModeState(mode);
+    toPhaser({ type: 'SET_TOOL_MODE', mode });
+  }, [toPhaser]);
+
+  // Messages from Phaser
+  useEffect(() => {
+    const onMsg = (ev: MessageEvent) => {
+      const m = ev.data;
+      if (!m?.type) return;
+      switch (m.type) {
+        case 'SCENE_READY': setHierarchy(m.hierarchy ?? []); break;
+        case 'OBJECT_SELECTED':
+          store.setSelectedObject(m.id, {
+            x: round2(m.x ?? 0), y: round2(m.y ?? 0),
+            rotation: round2(m.rotation ?? 0),
+            scaleX: round2(m.scaleX ?? 1), scaleY: round2(m.scaleY ?? 1),
+            alpha: round2(m.alpha ?? 1), tint: m.tint ?? '#ffffff',
+            visible: m.visible ?? true, depth: m.depth ?? 0,
+            originX: round2(m.originX ?? 0.5), originY: round2(m.originY ?? 0.5),
+          }); break;
+        case 'OBJECT_DESELECTED': store.setSelectedObject(null); break;
+        case 'OBJECT_TRANSFORMED': {
+          const cur = useEditorStore.getState();
+          if (m.id !== cur.selectedId) break;
+          store.updateProperties({
+            x: m.x !== undefined ? round2(m.x) : cur.x,
+            y: m.y !== undefined ? round2(m.y) : cur.y,
+            rotation: m.rotation !== undefined ? round2(m.rotation) : cur.rotation,
+            scaleX: m.scaleX !== undefined ? round2(m.scaleX) : cur.scaleX,
+            scaleY: m.scaleY !== undefined ? round2(m.scaleY) : cur.scaleY,
+          }); break;
+        }
+        case 'PUSH_HISTORY': {
+          const s = useEditorStore.getState();
+          if (!s.selectedId) break;
+          store.pushHistory({
+            id: s.selectedId,
+            props: { x: s.x, y: s.y, rotation: s.rotation, scaleX: s.scaleX,
+                     scaleY: s.scaleY, alpha: s.alpha, tint: s.tint, visible: s.visible,
+                     depth: s.depth, originX: s.originX, originY: s.originY },
+          }); break;
+        }
+        case 'OBJECT_ADDED':
+          setHierarchy(prev => [...prev, { id: m.id, name: m.name, type: m.objType }]); break;
+        case 'OBJECT_REMOVED':
+          setHierarchy(prev => prev.filter(i => i.id !== m.id));
+          if (useEditorStore.getState().selectedId === m.id) store.setSelectedObject(null); break;
+        case 'OBJECT_RENAMED':
+          setHierarchy(prev => prev.map(i => i.id === m.id ? { ...i, name: m.name } : i)); break;
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  // Keyboard
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement) return;
+      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        const entry = useEditorStore.getState().undo();
+        if (entry) toPhaser({ type: 'SET_PROPERTIES', id: entry.id, ...entry.props }); return;
+      }
+      if ((e.ctrlKey && e.key.toLowerCase() === 'y') ||
+          (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) {
+        e.preventDefault();
+        const entry = useEditorStore.getState().redo();
+        if (entry) toPhaser({ type: 'SET_PROPERTIES', id: entry.id, ...entry.props }); return;
+      }
+      switch (e.key.toLowerCase()) {
+        case 'q': setTool('select'); break;
+        case 'w': setTool('move'); break;
+        case 'e': setTool('rotate'); break;
+        case 'r': setTool('scale'); break;
+        case 'f': toPhaser({ type: 'RESET_CAMERA' }); break;
+        case 'delete': { const id = useEditorStore.getState().selectedId; if (id) handleDeleteObject(id); break; }
+        case 'escape': store.setSelectedObject(null); toPhaser({ type: 'DESELECT_ALL' }); break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Clear drag state on global dragend
+  useEffect(() => {
+    const onDragEnd = () => setIsDraggingAsset(false);
+    window.addEventListener('dragend', onDragEnd);
+    return () => window.removeEventListener('dragend', onDragEnd);
+  }, []);
+
+  // Panel resize (mouse drag on handle)
+  const startPanelResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    resizeStartRef.current = { y: e.clientY, h: panelH };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const delta = resizeStartRef.current.y - ev.clientY;
+      setPanelH(Math.max(MIN_PANEL_H, Math.min(MAX_PANEL_H, resizeStartRef.current.h + delta)));
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // Open project
+  const handleOpenProject = async () => {
+    const folder = await (window as any).electronAPI?.openFolder();
+    if (!folder) return;
+    const config = await (window as any).electronAPI?.readProjectConfig(folder);
+    if (config?.canvasWidth && config?.canvasHeight) {
+      setProjectFolder(folder);
+      setCanvasSize({ w: config.canvasWidth, h: config.canvasHeight });
+      setHierarchy([]);
+      store.setSelectedObject(null);
+    } else {
+      setSetupDialog({ show: true, pending: folder });
+    }
+  };
+
+  const handleSetupConfirm = async (w: number, h: number) => {
+    const folder = setupDialog.pending!;
+    await (window as any).electronAPI?.writeProjectConfig(folder, { canvasWidth: w, canvasHeight: h });
+    setProjectFolder(folder);
+    setCanvasSize({ w, h });
+    setHierarchy([]);
+    store.setSelectedObject(null);
+    setSetupDialog({ show: false, pending: null });
+  };
+
+  // Hierarchy actions
+  const handleSelectObject = (id: string) => toPhaser({ type: 'SELECT_OBJECT', id });
+  const handleDeleteObject = (id: string) => {
+    toPhaser({ type: 'DELETE_OBJECT', id });
+    setHierarchy(prev => prev.filter(i => i.id !== id));
+    if (store.selectedId === id) store.setSelectedObject(null);
+  };
+  const handleDuplicateObject = (id: string) =>
+    toPhaser({ type: 'DUPLICATE_OBJECT', id, newId: `${id}_copy_${Date.now()}` });
+  const handleRenameObject = (id: string, name: string) => {
+    toPhaser({ type: 'RENAME_OBJECT', id, name });
+    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, name } : i));
+  };
+
+  // Drop asset on viewport (via overlay div)
+  const handleDropAsset = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingAsset(false);
+    const raw = e.dataTransfer.getData('application/phaser-asset');
+    if (!raw) return;
+    const file = JSON.parse(raw);
+
+    // Letterbox-aware coordinate conversion
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const ir = iframe.getBoundingClientRect();
+    const gameAspect = canvasSize.w / canvasSize.h;
+    const iframeAspect = ir.width / ir.height;
+    let displayW: number, displayH: number, offsetX: number, offsetY: number;
+    if (iframeAspect > gameAspect) {
+      displayH = ir.height; displayW = displayH * gameAspect;
+      offsetX = (ir.width - displayW) / 2; offsetY = 0;
+    } else {
+      displayW = ir.width; displayH = displayW / gameAspect;
+      offsetX = 0; offsetY = (ir.height - displayH) / 2;
+    }
+    const scale = displayW / canvasSize.w;
+    const canvasX = Math.round((e.clientX - ir.left - offsetX) / scale);
+    const canvasY = Math.round((e.clientY - ir.top - offsetY) / scale);
+
+    toPhaser({ type: 'ADD_SPRITE_FROM_ASSET', file, x: canvasX, y: canvasY });
+  };
+
+  // Drop asset on hierarchy = add at canvas center
+  const handleDropOnHierarchy = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingAsset(false);
+    const raw = e.dataTransfer.getData('application/phaser-asset');
+    if (!raw) return;
+    const file = JSON.parse(raw);
+    toPhaser({ type: 'ADD_SPRITE_FROM_ASSET', file, x: canvasSize.w / 2, y: canvasSize.h / 2 });
+  };
+
+  // Inspector field
+  const updateField = (key: keyof ObjectProps, value: any) => {
+    store.updateProperties({ [key]: value });
+    if (store.selectedId) toPhaser({ type: 'SET_PROPERTIES', id: store.selectedId, [key]: value });
+  };
+
+  const handleSnap = () => {
+    store.toggleSnap();
+    toPhaser({ type: 'SET_SNAP', enabled: !store.snapEnabled });
+  };
+
+  const handleIframeLoad = () => {
+    toPhaser({ type: 'SET_TOOL_MODE', mode: toolMode });
+    toPhaser({ type: 'SET_SNAP', enabled: store.snapEnabled });
+  };
+
+  const { selectedId, x, y, rotation, scaleX, scaleY, alpha, tint, visible, depth, originX, originY, snapEnabled, past, future } = store;
+
+  return (
+    <div className="flex h-screen w-screen flex-col bg-gray-900 text-white select-none overflow-hidden">
+
+      {setupDialog.show && (
+        <SetupDialog
+          onConfirm={handleSetupConfirm}
+          onCancel={() => setSetupDialog({ show: false, pending: null })}
+        />
+      )}
+
+      {/* ── Toolbar ── */}
+      <header className="toolbar flex h-11 items-center gap-1 px-3 flex-shrink-0">
+        <span className="font-bold text-sm text-white mr-3 tracking-wide whitespace-nowrap">⚡ Phaser Forge</span>
+
+        <button onClick={handleOpenProject} title={projectFolder ?? 'Open Project Folder'}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-700 transition-all max-w-40 mr-1">
+          📁 <span className="truncate hidden lg:inline">{projectFolder ? projectFolder.split(/[\\/]/).pop() : 'Open Project'}</span>
+        </button>
+
+        {projectFolder && (
+          <span className="text-[10px] text-gray-600 border border-gray-700 rounded px-1.5 py-0.5 mr-2 hidden xl:block">
+            {canvasSize.w}×{canvasSize.h}
+          </span>
+        )}
+
+        <div className="w-px h-5 bg-gray-700 mr-1" />
+
+        <div className="flex items-center gap-0.5">
+          <ToolBtn icon="↖" label="Select (Q)" active={toolMode === 'select'} onClick={() => setTool('select')} />
+          <ToolBtn icon="✥" label="Move (W)" active={toolMode === 'move'} onClick={() => setTool('move')} />
+          <ToolBtn icon="↻" label="Rotate (E)" active={toolMode === 'rotate'} onClick={() => setTool('rotate')} />
+          <ToolBtn icon="⤢" label="Scale (R)" active={toolMode === 'scale'} onClick={() => setTool('scale')} />
+        </div>
+
+        <div className="w-px h-5 bg-gray-700 mx-1" />
+
+        <button onClick={handleSnap} title="Snap to Grid"
+          className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium border transition-all ${
+            snapEnabled ? 'border-blue-500 bg-blue-900/40 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
+          ⊞ <span className="hidden xl:inline">Snap</span>
+        </button>
+
+        <button onClick={() => toPhaser({ type: 'RESET_CAMERA' })} title="Reset Camera View (F)"
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium border border-gray-700 text-gray-400 hover:bg-gray-700 transition-all ml-0.5">
+          ⌂ <span className="hidden xl:inline">Reset View</span>
+        </button>
+
+        <div className="flex items-center gap-0.5 ml-1">
+          <ToolBtn icon="↩" label="Undo" disabled={past.length === 0}
+            onClick={() => { const e = store.undo(); if (e) toPhaser({ type: 'SET_PROPERTIES', id: e.id, ...e.props }); }} />
+          <ToolBtn icon="↪" label="Redo" disabled={future.length === 0}
+            onClick={() => { const e = store.redo(); if (e) toPhaser({ type: 'SET_PROPERTIES', id: e.id, ...e.props }); }} />
+        </div>
+
+        <div className="flex-1" />
+        {past.length > 0 && <span className="text-xs text-gray-700 hidden xl:block mr-2">{past.length} action{past.length !== 1 ? 's' : ''}</span>}
+        <ToolBtn icon="▶" label="Play" onClick={() => {}} extra="text-green-400" />
+        <ToolBtn icon="💾" label="Save" onClick={() => {}} />
+      </header>
+
+      {/* ── Main layout ── */}
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* ── Hierarchy — also accepts asset drops ── */}
+        <div
+          onDragOver={isDraggingAsset ? e => e.preventDefault() : undefined}
+          onDrop={isDraggingAsset ? handleDropOnHierarchy : undefined}
+          className={`relative ${isDraggingAsset ? 'ring-1 ring-inset ring-blue-600/40' : ''}`}
+        >
+          <HierarchyPanel
+            items={hierarchy} selectedId={selectedId}
+            onSelect={handleSelectObject} onDelete={handleDeleteObject}
+            onDuplicate={handleDuplicateObject} onRename={handleRenameObject}
+          />
+          {isDraggingAsset && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <span className="text-[10px] text-blue-400 bg-gray-900/80 px-2 py-1 rounded">Drop to add at center</span>
+            </div>
+          )}
+        </div>
+
+        {/* ── Viewport ── */}
+        <main className="flex-1 bg-[#0a0f1a] relative overflow-hidden">
+          <iframe ref={iframeRef} src={iframeSrc} onLoad={handleIframeLoad}
+            className="w-full h-full border-none" title="Phaser Viewport" />
+
+          {/* Transparent drag-drop overlay — sits over iframe while dragging asset */}
+          {isDraggingAsset && (
+            <div
+              className="absolute inset-0 z-10 cursor-copy"
+              onDragOver={e => e.preventDefault()}
+              onDrop={handleDropAsset}
+              onDragLeave={() => setIsDraggingAsset(false)}
+            >
+              <div className="absolute inset-0 border-2 border-dashed border-blue-500/40 pointer-events-none" />
+            </div>
+          )}
+
+          {/* Badges */}
+          <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
+            <span className="bg-gray-900/80 backdrop-blur text-gray-300 text-xs px-2 py-1 rounded uppercase tracking-wider border border-gray-700">{toolMode}</span>
+            {snapEnabled && <span className="bg-blue-900/80 backdrop-blur text-blue-300 text-xs px-2 py-1 rounded border border-blue-700">SNAP 32px</span>}
+          </div>
+          <div className="absolute bottom-3 left-3 text-gray-700 text-[10px] pointer-events-none">
+            Q·W·E·R = tools &nbsp;·&nbsp; Scroll = zoom &nbsp;·&nbsp; Middle mouse = pan &nbsp;·&nbsp; F = reset view &nbsp;·&nbsp; Del = delete
+          </div>
+        </main>
+
+        {/* ── Inspector ── */}
+        <aside className="w-64 flex flex-col border-l border-gray-700 bg-gray-800 overflow-y-auto flex-shrink-0">
+          <div className="px-3 py-2 border-b border-gray-700">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Inspector</span>
+          </div>
+          {selectedId ? (
+            <div className="p-3 space-y-4 text-sm">
+              <div className="bg-gray-900 rounded px-3 py-2">
+                <div className="text-[10px] text-gray-500 mb-0.5">ID</div>
+                <div className="text-xs text-white font-mono truncate">{selectedId}</div>
+              </div>
+              <section>
+                <div className="section-label mb-2">Position</div>
+                <InspectorField label="X" value={x} step={1} onChange={v => updateField('x', v)} />
+                <InspectorField label="Y" value={y} step={1} onChange={v => updateField('y', v)} />
+              </section>
+              <section>
+                <div className="section-label mb-2">Rotation</div>
+                <InspectorField label="Angle (rad)" value={rotation} step={0.01} onChange={v => updateField('rotation', v)} />
+                <div className="text-[10px] text-gray-600 text-right -mt-1">{Math.round((rotation * 180) / Math.PI)}°</div>
+              </section>
+              <section>
+                <div className="section-label mb-2">Scale</div>
+                <InspectorField label="Scale X" value={scaleX} step={0.01} min={0} onChange={v => updateField('scaleX', v)} />
+                <InspectorField label="Scale Y" value={scaleY} step={0.01} min={0} onChange={v => updateField('scaleY', v)} />
+              </section>
+              <section>
+                <div className="section-label mb-2">Appearance</div>
+                <InspectorField label="Alpha" value={alpha} step={0.01} min={0} max={1} onChange={v => updateField('alpha', Math.min(1, Math.max(0, v)))} />
+                <InspectorField label="Tint" value={tint} type="color" onChange={v => updateField('tint', v)} />
+                <InspectorField label="Visible" value={visible} type="checkbox" onChange={v => updateField('visible', v)} />
+              </section>
+              <section>
+                <div className="section-label mb-2">Depth (Z-order)</div>
+                <InspectorField label="Depth" value={depth} step={1} onChange={v => updateField('depth', Math.round(v))} />
+                <div className="text-[10px] text-gray-600 -mt-1">Higher = rendered on top</div>
+              </section>
+              <section>
+                <div className="section-label mb-2">Origin (Pivot)</div>
+                <InspectorField label="Origin X" value={originX} step={0.01} min={0} max={1} onChange={v => updateField('originX', Math.min(1, Math.max(0, v)))} />
+                <InspectorField label="Origin Y" value={originY} step={0.01} min={0} max={1} onChange={v => updateField('originY', Math.min(1, Math.max(0, v)))} />
+                {/* Quick presets */}
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {([
+                    { l: 'TL', x: 0, y: 0 },
+                    { l: 'TC', x: 0.5, y: 0 },
+                    { l: 'TR', x: 1, y: 0 },
+                    { l: 'CL', x: 0, y: 0.5 },
+                    { l: 'C', x: 0.5, y: 0.5 },
+                    { l: 'CR', x: 1, y: 0.5 },
+                    { l: 'BL', x: 0, y: 1 },
+                    { l: 'BC', x: 0.5, y: 1 },
+                    { l: 'BR', x: 1, y: 1 },
+                  ] as const).map(p => (
+                    <button key={p.l}
+                      onClick={() => { updateField('originX', p.x); updateField('originY', p.y); }}
+                      className={`px-1.5 py-0.5 rounded text-[9px] border transition-colors ${
+                        originX === p.x && originY === p.y
+                          ? 'border-blue-500 bg-blue-900/40 text-blue-300'
+                          : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'
+                      }`}>
+                      {p.l}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-[10px] text-gray-600 mt-1">Affects where x/y anchors on the sprite</div>
+              </section>
+              <button onClick={() => handleDeleteObject(selectedId)}
+                className="w-full py-2 rounded text-xs text-red-400 border border-red-900 hover:bg-red-900/30 transition-colors">
+                🗑 Delete Object
+              </button>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+              <div className="text-5xl mb-4 opacity-20">🎯</div>
+              <p className="text-xs text-gray-500 leading-relaxed">Click an object in the viewport or hierarchy to inspect.</p>
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {/* ── Asset Browser (resizable) ── */}
+      <footer className="border-t border-gray-700 bg-gray-800 flex-shrink-0"
+        style={{ height: panelOpen ? panelH + 36 : 36 }}>
+
+        {/* Resize handle */}
+        {panelOpen && (
+          <div
+            onMouseDown={startPanelResize}
+            className="h-1 w-full cursor-ns-resize bg-gray-700 hover:bg-blue-600 transition-colors"
+            title="Drag to resize panel"
+          />
+        )}
+
+        {/* Panel header */}
+        <div className="px-3 flex items-center gap-3 h-9 border-b border-gray-700">
+          <button onClick={() => setPanelOpen(o => !o)} className="text-gray-500 hover:text-white transition-colors">
+            {panelOpen ? '▾' : '▸'}
+          </button>
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Assets</span>
+          {projectFolder && (
+            <span className="text-[10px] text-gray-600 ml-1 truncate max-w-48">{projectFolder}</span>
+          )}
+          <div className="flex-1" />
+          <button onClick={handleOpenProject} className="text-xs text-gray-500 hover:text-white transition-colors px-2 py-0.5 rounded hover:bg-gray-700">
+            📁 {projectFolder ? 'Change' : 'Open Folder'}
+          </button>
+        </div>
+
+        {/* Panel content */}
+        {panelOpen && (
+          <div style={{ height: panelH - 4 }} className="flex overflow-hidden">
+            <AssetBrowser
+              projectFolder={projectFolder}
+              onOpenProject={handleOpenProject}
+              onDragAsset={() => setIsDraggingAsset(true)}
+            />
+          </div>
+        )}
+      </footer>
+    </div>
+  );
+}
