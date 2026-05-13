@@ -47,6 +47,12 @@
       "out/**/*",
       "!out/**/*.map"
     ],
+    "extraResources": [
+      {
+        "from": "src/bridge/phaser-forge-bridge.js",
+        "to": "bridge/phaser-forge-bridge.js"
+      }
+    ],
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] },

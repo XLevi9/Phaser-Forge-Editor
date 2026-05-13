@@ -170,6 +170,15 @@ export default function App() {
   const overlayRef = useRef<HTMLDivElement>(null);
   const activeBridgeSceneRef = useRef<string | null>(null);
   const bridgeSelectedIdRef = useRef<string | null>(null);
+  const liveDragRef = useRef<{
+    id: string;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
   const pingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const toGame = useCallback((msg: object) => {
@@ -207,7 +216,7 @@ export default function App() {
   useEffect(() => {
     if (bridgeStatus !== 'connected' || !liveEditMode || !bridgeSelectedId) return;
     const interval = setInterval(() => {
-      toGame({ forge: true, type: 'FORGE_SELECT', id: bridgeSelectedId });
+      toGame({ forge: true, type: 'FORGE_SELECT', id: bridgeSelectedId, reason: 'refresh' });
     }, 500);
     return () => clearInterval(interval);
   }, [bridgeStatus, liveEditMode, bridgeSelectedId, toGame]);
@@ -327,7 +336,8 @@ export default function App() {
         if (m.type === 'FORGE_SELECTED') {
           setBridgeSelected(m.props ?? null);
           setBridgeSelectedId(m.id ?? null);
-          if (m.sceneKey) {
+          const shouldSwitchScene = m.reason !== 'refresh' && m.reason !== 'move';
+          if (m.sceneKey && shouldSwitchScene) {
             setActiveBridgeScene(m.sceneKey);
             requestBridgeObjects(m.sceneKey);
           }
@@ -614,6 +624,11 @@ export default function App() {
   };
 
   const handleLiveViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (liveDragRef.current?.moved) {
+      liveDragRef.current = null;
+      return;
+    }
+    liveDragRef.current = null;
     if (!activeBridgeScene || bridgeStatus !== 'connected') return;
     const iframe = iframeRef.current;
     if (!iframe) return;
@@ -625,6 +640,60 @@ export default function App() {
       viewportX: e.clientX - rect.left,
       viewportY: e.clientY - rect.top,
     });
+  };
+
+  const pointInsideBounds = (x: number, y: number, b: BridgeScreenBounds) =>
+    x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+
+  const handleLivePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!bridgeSelected || !bridgeScreenBounds || !overlayRef.current) return;
+    const overlayRect = overlayRef.current.getBoundingClientRect();
+    const localX = e.clientX - overlayRect.left;
+    const localY = e.clientY - overlayRect.top;
+    if (!pointInsideBounds(localX, localY, bridgeScreenBounds)) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    liveDragRef.current = {
+      id: bridgeSelected.id,
+      pointerId: e.pointerId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startX: bridgeSelected.x,
+      startY: bridgeSelected.y,
+      moved: false,
+    };
+  };
+
+  const handleLivePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = liveDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const dx = e.clientX - drag.startClientX;
+    const dy = e.clientY - drag.startClientY;
+    if (Math.abs(dx) + Math.abs(dy) < 2) return;
+    drag.moved = true;
+    toGame({
+      forge: true,
+      type: 'FORGE_MOVE_OBJECT',
+      id: drag.id,
+      startX: drag.startX,
+      startY: drag.startY,
+      dx,
+      dy,
+    });
+  };
+
+  const handleLivePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = liveDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+    toGame({ forge: true, type: 'FORGE_SELECT', id: drag.id, reason: 'refresh' });
+    if (activeBridgeSceneRef.current) requestBridgeObjects(activeBridgeSceneRef.current);
+  };
+
+  const handleLivePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = liveDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    liveDragRef.current = null;
   };
 
   // Inspector field
@@ -765,6 +834,9 @@ export default function App() {
                 <div className="px-2 py-1.5 border-b border-gray-700 flex-shrink-0">
                   <select value={activeBridgeScene ?? ''} onChange={e => {
                     setActiveBridgeScene(e.target.value);
+                    setBridgeSelected(null);
+                    setBridgeSelectedId(null);
+                    setBridgeScreenBounds(null);
                     requestBridgeObjects(e.target.value);
                   }} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500">
                     {bridgeScenes.map(s => (
@@ -858,6 +930,10 @@ export default function App() {
               ref={overlayRef}
               className="absolute inset-0 z-10 cursor-crosshair"
               onClick={handleLiveViewportClick}
+              onPointerDown={handleLivePointerDown}
+              onPointerMove={handleLivePointerMove}
+              onPointerUp={handleLivePointerUp}
+              onPointerCancel={handleLivePointerCancel}
             >
               {bridgeScreenBounds && bridgeScreenBounds.width > 0 && bridgeScreenBounds.height > 0 && (
                 <div
