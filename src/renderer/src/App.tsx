@@ -314,11 +314,10 @@ export default function App() {
         if (m.type === 'FORGE_SELECTED') {
           setBridgeSelected(m.props ?? null);
           setBridgeSelectedId(m.id ?? null);
-          if (m.screenBounds && overlayRef.current) {
-            const or = overlayRef.current.getBoundingClientRect();
+          if (m.screenBounds) {
             setBridgeScreenBounds({
-              x: m.screenBounds.x - or.left,
-              y: m.screenBounds.y - or.top,
+              x: m.screenBounds.x,
+              y: m.screenBounds.y,
               width: m.screenBounds.width,
               height: m.screenBounds.height,
             });

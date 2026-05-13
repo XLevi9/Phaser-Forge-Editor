@@ -183,6 +183,20 @@ if (window.parent !== window) {
     }, '*');
   }
 
+  function pickObject(scene, gameX, gameY) {
+    const cam = scene.cameras?.main;
+    const point = cam?.getWorldPoint ? cam.getWorldPoint(gameX, gameY) : { x: gameX, y: gameY };
+    const list = scene.children?.list ?? [];
+    const objects = list
+      .filter(obj => !obj.__forgeInternal && obj.active !== false && obj.visible !== false)
+      .slice()
+      .sort((a, b) => ((b.depth ?? 0) - (a.depth ?? 0)) || (list.indexOf(b) - list.indexOf(a)));
+    return objects.find(obj => {
+      const b = getBounds(obj);
+      return point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height;
+    });
+  }
+
   window.addEventListener('message', (ev) => {
     if (!ev.data?.forge) return;
     const m = ev.data;
@@ -238,23 +252,19 @@ if (window.parent !== window) {
 
     if (m.type === 'FORGE_PICK_OBJECT') {
       if (!game) return;
-      const scene = game.scene.getScene(m.sceneKey);
-      if (!scene) return;
       const canvas = game.canvas;
       const rect = canvas.getBoundingClientRect();
       const gameX = (m.viewportX - rect.left) * (canvas.width / rect.width);
       const gameY = (m.viewportY - rect.top) * (canvas.height / rect.height);
-      const cam = scene.cameras?.main;
-      const point = cam?.getWorldPoint ? cam.getWorldPoint(gameX, gameY) : { x: gameX, y: gameY };
-      const objects = scene.children.list
-        .filter(obj => !obj.__forgeInternal && obj.active !== false && obj.visible !== false)
-        .slice()
-        .sort((a, b) => ((b.depth ?? 0) - (a.depth ?? 0)) || (scene.children.list.indexOf(b) - scene.children.list.indexOf(a)));
-      const hit = objects.find(obj => {
-        const b = getBounds(obj);
-        return point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height;
-      });
-      if (hit) sendSelected(scene, hit);
+      const preferred = m.sceneKey ? game.scene.getScene(m.sceneKey) : null;
+      const scenes = [
+        preferred,
+        ...game.scene.scenes.filter(s => s !== preferred && s.sys?.isActive?.() && s.sys?.isVisible?.()),
+      ].filter(Boolean);
+      const picked = scenes
+        .map(scene => ({ scene, hit: pickObject(scene, gameX, gameY) }))
+        .find(r => r.hit);
+      if (picked) sendSelected(picked.scene, picked.hit);
       else window.parent.postMessage({ forge: true, type: 'FORGE_DESELECTED' }, '*');
     }
   });
