@@ -168,6 +168,8 @@ export default function App() {
   const [bridgeScreenBounds, setBridgeScreenBounds] = useState<BridgeScreenBounds | null>(null);
   const [liveEditMode, setLiveEditMode] = useState(false); // false = play, true = select objects
   const overlayRef = useRef<HTMLDivElement>(null);
+  const activeBridgeSceneRef = useRef<string | null>(null);
+  const bridgeSelectedIdRef = useRef<string | null>(null);
   const pingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const toGame = useCallback((msg: object) => {
@@ -177,6 +179,9 @@ export default function App() {
   const requestBridgeObjects = useCallback((sceneKey: string) => {
     toGame({ forge: true, type: 'FORGE_GET_OBJECTS', sceneKey });
   }, [toGame]);
+
+  useEffect(() => { activeBridgeSceneRef.current = activeBridgeScene; }, [activeBridgeScene]);
+  useEffect(() => { bridgeSelectedIdRef.current = bridgeSelectedId; }, [bridgeSelectedId]);
 
   // Dev server
   type DevStatus = 'idle' | 'starting' | 'running' | 'error';
@@ -198,6 +203,14 @@ export default function App() {
     });
     return () => api?.removeDevServerListeners();
   }, []);
+
+  useEffect(() => {
+    if (bridgeStatus !== 'connected' || !liveEditMode || !bridgeSelectedId) return;
+    const interval = setInterval(() => {
+      toGame({ forge: true, type: 'FORGE_SELECT', id: bridgeSelectedId });
+    }, 500);
+    return () => clearInterval(interval);
+  }, [bridgeStatus, liveEditMode, bridgeSelectedId, toGame]);
 
   // When game URL changes, reset bridge and start pinging
   useEffect(() => {
@@ -314,6 +327,10 @@ export default function App() {
         if (m.type === 'FORGE_SELECTED') {
           setBridgeSelected(m.props ?? null);
           setBridgeSelectedId(m.id ?? null);
+          if (m.sceneKey) {
+            setActiveBridgeScene(m.sceneKey);
+            requestBridgeObjects(m.sceneKey);
+          }
           if (m.screenBounds) {
             setBridgeScreenBounds({
               x: m.screenBounds.x,
@@ -330,8 +347,22 @@ export default function App() {
           setBridgeSelectedId(null);
           setBridgeScreenBounds(null);
         }
-        if (m.type === 'FORGE_PROP_SET' && bridgeSelected?.id === m.id) {
-          setBridgeSelected(prev => prev ? { ...prev, [m.prop]: m.value } : null);
+        if (m.type === 'FORGE_PROP_SET' && bridgeSelectedIdRef.current === m.id) {
+          setBridgeSelected(m.props ?? null);
+          if (m.screenBounds) {
+            setBridgeScreenBounds({
+              x: m.screenBounds.x,
+              y: m.screenBounds.y,
+              width: m.screenBounds.width,
+              height: m.screenBounds.height,
+            });
+          }
+          if (m.sceneKey) requestBridgeObjects(m.sceneKey);
+          else if (activeBridgeSceneRef.current) requestBridgeObjects(activeBridgeSceneRef.current);
+        }
+        if (m.type === 'FORGE_PICK_DEBUG') {
+          const scenes = (m.scenes ?? []).map((s: any) => `${s.key}:${s.objects}`).join(', ');
+          setDevLogs(prev => prev + `\n[Bridge pick missed at ${m.x},${m.y}; scenes ${scenes || 'none'}]\n`);
         }
         return;
       }

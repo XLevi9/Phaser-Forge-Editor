@@ -177,6 +177,7 @@ if (window.parent !== window) {
       forge: true,
       type: 'FORGE_SELECTED',
       id: ensureId(obj),
+      sceneKey: scene?.sys?.settings?.key,
       props: getProps(obj),
       bounds,
       screenBounds: getScreenBounds(scene, bounds),
@@ -241,7 +242,17 @@ if (window.parent !== window) {
       else if (prop === 'alpha')    obj.alpha = v;
       else if (prop === 'visible')  obj.visible = v;
       else if (prop === 'depth')    obj.setDepth?.(v);
-      window.parent.postMessage({ forge: true, type: 'FORGE_PROP_SET', id: m.id, prop, value: v }, '*');
+      const bounds = getBounds(obj);
+      window.parent.postMessage({
+        forge: true,
+        type: 'FORGE_PROP_SET',
+        id: m.id,
+        sceneKey: obj.scene?.sys?.settings?.key,
+        prop,
+        value: v,
+        props: getProps(obj),
+        screenBounds: getScreenBounds(obj.scene, bounds),
+      }, '*');
     }
 
     if (m.type === 'FORGE_SELECT') {
@@ -265,7 +276,16 @@ if (window.parent !== window) {
         .map(scene => ({ scene, hit: pickObject(scene, gameX, gameY) }))
         .find(r => r.hit);
       if (picked) sendSelected(picked.scene, picked.hit);
-      else window.parent.postMessage({ forge: true, type: 'FORGE_DESELECTED' }, '*');
+      else {
+        window.parent.postMessage({
+          forge: true,
+          type: 'FORGE_PICK_DEBUG',
+          x: Math.round(gameX),
+          y: Math.round(gameY),
+          scenes: scenes.map(s => ({ key: s.sys?.settings?.key, objects: s.children?.list?.length ?? 0 })),
+        }, '*');
+        window.parent.postMessage({ forge: true, type: 'FORGE_DESELECTED' }, '*');
+      }
     }
   });
 
