@@ -157,6 +157,7 @@ export default function App() {
   // Bridge (live mode)
   type BridgeStatus = 'disconnected' | 'connecting' | 'connected';
   interface BridgeObject { id: string; name: string; type: string; x: number; y: number; rotation: number; scaleX: number; scaleY: number; alpha: number; visible: boolean; depth: number; originX: number; originY: number; textureKey?: string; text?: string; displayWidth?: number; displayHeight?: number; }
+  interface BridgeScreenBounds { x: number; y: number; width: number; height: number; }
   interface BridgeScene { key: string; active: boolean; visible: boolean; }
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('disconnected');
   const [bridgeScenes, setBridgeScenes] = useState<BridgeScene[]>([]);
@@ -164,6 +165,9 @@ export default function App() {
   const [bridgeObjects, setBridgeObjects] = useState<BridgeObject[]>([]);
   const [bridgeSelectedId, setBridgeSelectedId] = useState<string | null>(null);
   const [bridgeSelected, setBridgeSelected] = useState<BridgeObject | null>(null);
+  const [bridgeScreenBounds, setBridgeScreenBounds] = useState<BridgeScreenBounds | null>(null);
+  const [liveEditMode, setLiveEditMode] = useState(false); // false = play, true = select objects
+  const overlayRef = useRef<HTMLDivElement>(null);
   const pingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const toGame = useCallback((msg: object) => {
@@ -202,6 +206,7 @@ export default function App() {
     setBridgeObjects([]);
     setBridgeSelectedId(null);
     setBridgeSelected(null);
+    setBridgeScreenBounds(null);
     if (!devUrl) return;
     setBridgeStatus('connecting');
     pingTimerRef.current = setTimeout(() => {
@@ -210,7 +215,10 @@ export default function App() {
       const interval = setInterval(() => {
         attempts++;
         toGame({ forge: true, type: 'FORGE_PING' });
-        if (attempts >= 15) clearInterval(interval);
+        if (attempts >= 15) {
+          clearInterval(interval);
+          setBridgeStatus(prev => prev === 'connecting' ? 'disconnected' : prev);
+        }
       }, 2000);
       pingTimerRef.current = interval as any;
     }, 1500);
@@ -236,6 +244,21 @@ export default function App() {
         setDevStatus('error');
         setDevLogs(prev => prev + `\n[Error: ${result?.error ?? 'Unknown error'}]\n`);
       }
+    }
+  };
+
+  const handleInstallBridge = async () => {
+    if (!projectFolder) return;
+    const r = await (window as any).electronAPI?.installBridge(projectFolder);
+    if (r?.ok) {
+      setBridgeStatus('disconnected');
+      setDevLogs(prev => prev + "\n[Bridge installed: phaser-forge-bridge.js]\n[Import it from your game entry, e.g. src/main.js: import '../phaser-forge-bridge.js']\n");
+      setActiveTab('console');
+      if (!panelOpen) setPanelOpen(true);
+    } else {
+      setDevLogs(prev => prev + `\n[Bridge install failed: ${r?.error ?? 'Unknown error'}]\n`);
+      setActiveTab('console');
+      if (!panelOpen) setPanelOpen(true);
     }
   };
 
@@ -291,6 +314,22 @@ export default function App() {
         if (m.type === 'FORGE_SELECTED') {
           setBridgeSelected(m.props ?? null);
           setBridgeSelectedId(m.id ?? null);
+          if (m.screenBounds && overlayRef.current) {
+            const or = overlayRef.current.getBoundingClientRect();
+            setBridgeScreenBounds({
+              x: m.screenBounds.x - or.left,
+              y: m.screenBounds.y - or.top,
+              width: m.screenBounds.width,
+              height: m.screenBounds.height,
+            });
+          } else {
+            setBridgeScreenBounds(null);
+          }
+        }
+        if (m.type === 'FORGE_DESELECTED') {
+          setBridgeSelected(null);
+          setBridgeSelectedId(null);
+          setBridgeScreenBounds(null);
         }
         if (m.type === 'FORGE_PROP_SET' && bridgeSelected?.id === m.id) {
           setBridgeSelected(prev => prev ? { ...prev, [m.prop]: m.value } : null);
@@ -544,6 +583,20 @@ export default function App() {
     toPhaser({ type: 'ADD_SPRITE_FROM_ASSET', file, x: canvasSize.w / 2, y: canvasSize.h / 2 });
   };
 
+  const handleLiveViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!activeBridgeScene || bridgeStatus !== 'connected') return;
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const rect = iframe.getBoundingClientRect();
+    toGame({
+      forge: true,
+      type: 'FORGE_PICK_OBJECT',
+      sceneKey: activeBridgeScene,
+      viewportX: e.clientX - rect.left,
+      viewportY: e.clientY - rect.top,
+    });
+  };
+
   // Inspector field
   const updateField = (key: keyof ObjectProps, value: any) => {
     store.updateProperties({ [key]: value });
@@ -635,6 +688,17 @@ export default function App() {
           disabled={!projectFolder || devStatus === 'starting'}
           extra={devStatus === 'running' ? 'text-red-400' : devStatus === 'error' ? 'text-orange-400' : 'text-green-400'}
         />
+        {bridgeStatus === 'connected' && (
+          <button
+            title={liveEditMode ? 'Edit mode — click to select objects' : 'Play mode — interacting with game normally'}
+            onClick={() => { setLiveEditMode(m => !m); setBridgeScreenBounds(null); }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-all ${
+              liveEditMode
+                ? 'border-yellow-500 bg-yellow-900/40 text-yellow-300'
+                : 'border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
+            {liveEditMode ? '🎯 Edit' : '🎮 Play'}
+          </button>
+        )}
         <ToolBtn icon="⌨" label="VS Code" onClick={() => {
           if (projectFolder) (window as any).electronAPI?.openVSCode(projectFolder);
         }} disabled={!projectFolder} />
@@ -688,12 +752,9 @@ export default function App() {
                     <p className="text-xs text-gray-500 mb-3 leading-relaxed">
                       {bridgeStatus === 'connecting' ? 'Connecting to game bridge…' : 'Bridge not detected in game.'}
                     </p>
-                    {bridgeStatus === 'disconnected' && (
-                      <button onClick={async () => {
-                        if (!projectFolder) return;
-                        const r = await (window as any).electronAPI?.installBridge(projectFolder);
-                        if (r?.ok) alert('phaser-forge-bridge.js installed!\n\nAdd to your game entry point:\nimport \'./phaser-forge-bridge.js\'');
-                      }} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded transition-colors">
+                    {(bridgeStatus === 'connecting' || bridgeStatus === 'disconnected') && (
+                      <button onClick={handleInstallBridge}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded transition-colors">
                         Install Bridge
                       </button>
                     )}
@@ -759,6 +820,31 @@ export default function App() {
               onDrop={handleDropAsset}
             >
               <div className="absolute inset-0 border-2 border-dashed border-blue-500/40 pointer-events-none" />
+            </div>
+          )}
+
+          {devUrl && bridgeStatus === 'connected' && liveEditMode && !isDraggingAsset && (
+            <div
+              ref={overlayRef}
+              className="absolute inset-0 z-10 cursor-crosshair"
+              onClick={handleLiveViewportClick}
+            >
+              {bridgeScreenBounds && bridgeScreenBounds.width > 0 && bridgeScreenBounds.height > 0 && (
+                <div
+                  className="absolute border border-blue-400 shadow-[0_0_0_3px_rgba(59,130,246,0.25)] pointer-events-none"
+                  style={{
+                    left: bridgeScreenBounds.x,
+                    top: bridgeScreenBounds.y,
+                    width: bridgeScreenBounds.width,
+                    height: bridgeScreenBounds.height,
+                  }}
+                >
+                  <div className="absolute -top-1 -left-1 w-2 h-2 bg-white border border-blue-500" />
+                  <div className="absolute -top-1 -right-1 w-2 h-2 bg-white border border-blue-500" />
+                  <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-white border border-blue-500" />
+                  <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-white border border-blue-500" />
+                </div>
+              )}
             </div>
           )}
 

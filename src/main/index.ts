@@ -141,6 +141,48 @@ if (window.parent !== window) {
       Object.values(window).find(v => v?.constructor?.name === 'Game');
   }
 
+  function getBounds(obj) {
+    // Fallback: center-based bounds from display size
+    const dw = obj.displayWidth ?? obj.width ?? 32;
+    const dh = obj.displayHeight ?? obj.height ?? 32;
+    const ox = obj.originX ?? 0.5;
+    const oy = obj.originY ?? 0.5;
+    let bounds = { x: (obj.x ?? 0) - dw * ox, y: (obj.y ?? 0) - dh * oy, width: dw, height: dh };
+    try { const b = obj.getBounds?.(); if (b && b.width > 0) bounds = b; } catch (_) {}
+    return bounds;
+  }
+
+  function getScreenBounds(scene, bounds) {
+    const canvas = scene?.game?.canvas;
+    const cam = scene?.cameras?.main;
+    if (!canvas || !cam) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / canvas.width;
+    const scaleY = rect.height / canvas.height;
+    const x = (bounds.x - cam.scrollX) * cam.zoom;
+    const y = (bounds.y - cam.scrollY) * cam.zoom;
+    const width = bounds.width * cam.zoom;
+    const height = bounds.height * cam.zoom;
+    return {
+      x: rect.left + x * scaleX,
+      y: rect.top + y * scaleY,
+      width: width * scaleX,
+      height: height * scaleY,
+    };
+  }
+
+  function sendSelected(scene, obj) {
+    const bounds = getBounds(obj);
+    window.parent.postMessage({
+      forge: true,
+      type: 'FORGE_SELECTED',
+      id: ensureId(obj),
+      props: getProps(obj),
+      bounds,
+      screenBounds: getScreenBounds(scene, bounds),
+    }, '*');
+  }
+
   window.addEventListener('message', (ev) => {
     if (!ev.data?.forge) return;
     const m = ev.data;
@@ -191,9 +233,29 @@ if (window.parent !== window) {
     if (m.type === 'FORGE_SELECT') {
       const obj = _objMap.get(m.id);
       if (!obj) return;
-      let bounds = { x: obj.x, y: obj.y, width: obj.displayWidth ?? 0, height: obj.displayHeight ?? 0 };
-      try { const b = obj.getBounds?.(); if (b) bounds = b; } catch (_) {}
-      window.parent.postMessage({ forge: true, type: 'FORGE_SELECTED', id: m.id, props: getProps(obj), bounds }, '*');
+      sendSelected(obj.scene, obj);
+    }
+
+    if (m.type === 'FORGE_PICK_OBJECT') {
+      if (!game) return;
+      const scene = game.scene.getScene(m.sceneKey);
+      if (!scene) return;
+      const canvas = game.canvas;
+      const rect = canvas.getBoundingClientRect();
+      const gameX = (m.viewportX - rect.left) * (canvas.width / rect.width);
+      const gameY = (m.viewportY - rect.top) * (canvas.height / rect.height);
+      const cam = scene.cameras?.main;
+      const point = cam?.getWorldPoint ? cam.getWorldPoint(gameX, gameY) : { x: gameX, y: gameY };
+      const objects = scene.children.list
+        .filter(obj => !obj.__forgeInternal && obj.active !== false && obj.visible !== false)
+        .slice()
+        .sort((a, b) => ((b.depth ?? 0) - (a.depth ?? 0)) || (scene.children.list.indexOf(b) - scene.children.list.indexOf(a)));
+      const hit = objects.find(obj => {
+        const b = getBounds(obj);
+        return point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height;
+      });
+      if (hit) sendSelected(scene, hit);
+      else window.parent.postMessage({ forge: true, type: 'FORGE_DESELECTED' }, '*');
     }
   });
 
