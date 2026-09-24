@@ -8,6 +8,8 @@ A visual scene editor for **Phaser 4** games, built with Electron + React. Drag 
 ![Phaser](https://img.shields.io/badge/Phaser-4.x-blue)
 ![Electron](https://img.shields.io/badge/Electron-latest-teal)
 
+![Phaser Forge Editor: design mode, then live mode inspecting and editing a running Phaser game](docs/images/hero.gif)
+
 ---
 
 ## Why
