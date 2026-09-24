@@ -7,3 +7,4 @@ temp-asar
 .DS_Store
 *.log
 docs/skills
+*.tsbuildinfo
