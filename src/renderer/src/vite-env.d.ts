@@ -17,14 +17,37 @@ interface AssetFolder {
 
 type AssetEntry = AssetFile | AssetFolder;
 
+interface ProjectConfig {
+  canvasWidth: number;
+  canvasHeight: number;
+  devScript?: string;
+}
+
+interface SavedScene {
+  version: number;
+  objects: Record<string, any>[];
+}
+
+type IpcResult = { ok: boolean; error?: string };
+
 interface ElectronAPI {
   openFolder: () => Promise<string | null>;
   readAssets: (folder: string) => Promise<AssetEntry[]>;
   fileToDataUrl: (path: string) => Promise<string | null>;
+  readProjectConfig: (folder: string) => Promise<ProjectConfig | null>;
+  writeProjectConfig: (folder: string, cfg: ProjectConfig) => Promise<boolean>;
+  readProjectScripts: (folder: string) => Promise<string[]>;
+  saveScene: (folder: string, objects: object[]) => Promise<boolean>;
+  loadScene: (folder: string) => Promise<SavedScene | null>;
+  startDevServer: (folder: string, script?: string) => Promise<IpcResult & { url?: string }>;
+  stopDevServer: () => Promise<IpcResult>;
+  onDevServerOutput: (cb: (text: string) => void) => void;
+  onDevServerStopped: (cb: () => void) => void;
+  removeDevServerListeners: () => void;
+  openVSCode: (folder: string) => Promise<void>;
+  installBridge: (folder: string) => Promise<IpcResult>;
 }
 
-declare global {
-  interface Window {
-    electronAPI: ElectronAPI;
-  }
+interface Window {
+  electronAPI: ElectronAPI;
 }

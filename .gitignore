@@ -6,4 +6,5 @@ temp-asar
 .env
 .DS_Store
 *.log
-docs
+docs/skills
+*.tsbuildinfo

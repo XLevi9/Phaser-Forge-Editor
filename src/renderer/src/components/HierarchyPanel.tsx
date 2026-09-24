@@ -95,7 +95,6 @@ export default function HierarchyPanel({
 
       <div className="flex-1 overflow-y-auto py-1" onContextMenu={e => openMenu(e)}>
 
-        {/* Scene header row with + button */}
         <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-500 group">
           <span>📁</span>
           <span className="font-medium flex-1">Scene</span>
@@ -180,11 +179,9 @@ export default function HierarchyPanel({
           <p className="text-xs text-gray-600 text-center py-6 px-2">No objects in scene.<br />Drag an asset or add a primitive.</p>
         )}
 
-        {/* Right-click on empty area */}
         <div className="flex-1 min-h-8" onContextMenu={e => openMenu(e)} />
       </div>
 
-      {/* Context menu */}
       {menu && (
         <div ref={menuRef}
           style={{ top: menu.y - 40, left: menu.x - 20, position: 'fixed', zIndex: 9999 }}
