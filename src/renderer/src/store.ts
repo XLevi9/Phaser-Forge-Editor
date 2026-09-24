@@ -18,9 +18,10 @@ export interface ObjectProps {
   scrollFactorY: number;
 }
 
-interface HistoryEntry {
+export interface HistoryEntry {
   id: string;
-  props: ObjectProps;
+  before: ObjectProps;
+  after: ObjectProps;
 }
 
 interface EditorState extends ObjectProps {
@@ -28,15 +29,19 @@ interface EditorState extends ObjectProps {
   snapEnabled: boolean;
   texW: number;
   texH: number;
-  past: HistoryEntry[][];
-  future: HistoryEntry[][];
+  /** Last props recorded in history for the selected object — the `before` of the next entry. */
+  committed: ObjectProps;
+  past: HistoryEntry[];
+  future: HistoryEntry[];
   setSelectedObject: (id: string | null, props?: Partial<ObjectProps>, texW?: number, texH?: number) => void;
   updateProperties: (props: Partial<ObjectProps>) => void;
   toggleSnap: () => void;
-  pushHistory: (entry: HistoryEntry) => void;
-  undo: () => HistoryEntry | null;
-  redo: () => HistoryEntry | null;
+  commit: () => void;
+  undo: () => { id: string; props: ObjectProps } | null;
+  redo: () => { id: string; props: ObjectProps } | null;
 }
+
+const MAX_HISTORY = 100;
 
 const DEFAULTS: ObjectProps = {
   x: 0, y: 0, rotation: 0,
@@ -47,53 +52,59 @@ const DEFAULTS: ObjectProps = {
   flipX: false, flipY: false,
   scrollFactorX: 1, scrollFactorY: 1,
 };
+const PROP_KEYS = Object.keys(DEFAULTS) as (keyof ObjectProps)[];
+
+const pickProps = (s: ObjectProps): ObjectProps =>
+  Object.fromEntries(PROP_KEYS.map(k => [k, s[k]])) as unknown as ObjectProps;
+
+// Only overwrite the inspector when the history entry belongs to the selected object.
+const applyEntry = (s: EditorState, id: string, props: ObjectProps) =>
+  s.selectedId === id ? { ...props, committed: props } : {};
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   selectedId: null,
   snapEnabled: false,
   texW: 0,
   texH: 0,
-  past: [], future: [],
+  committed: DEFAULTS,
+  past: [],
+  future: [],
   ...DEFAULTS,
 
-  setSelectedObject: (id, props, texW = 0, texH = 0) =>
-    set({ selectedId: id, ...DEFAULTS, ...props, texW, texH }),
+  setSelectedObject: (id, props, texW = 0, texH = 0) => {
+    const next = { ...DEFAULTS, ...props };
+    set({ selectedId: id, ...next, committed: next, texW, texH });
+  },
 
-  updateProperties: (props) =>
-    set((s) => ({ ...s, ...props })),
+  updateProperties: (props) => set(props),
 
-  toggleSnap: () =>
-    set((s) => ({ snapEnabled: !s.snapEnabled })),
+  toggleSnap: () => set(s => ({ snapEnabled: !s.snapEnabled })),
 
-  pushHistory: (entry) =>
-    set((s) => ({
-      past: [...s.past, [entry]],
+  commit: () => {
+    const s = get();
+    if (!s.selectedId) return;
+    const after = pickProps(s);
+    if (PROP_KEYS.every(k => after[k] === s.committed[k])) return;
+    set({
+      past: [...s.past, { id: s.selectedId, before: s.committed, after }].slice(-MAX_HISTORY),
       future: [],
-    })),
+      committed: after,
+    });
+  },
 
   undo: () => {
-    const { past, future } = get();
-    if (past.length === 0) return null;
-    const prev = past[past.length - 1];
-    const entry = prev[0];
-    set({
-      past: past.slice(0, -1),
-      future: [prev, ...future],
-      ...entry.props,
-    });
-    return entry;
+    const s = get();
+    const entry = s.past[s.past.length - 1];
+    if (!entry) return null;
+    set({ past: s.past.slice(0, -1), future: [entry, ...s.future], ...applyEntry(s, entry.id, entry.before) });
+    return { id: entry.id, props: entry.before };
   },
 
   redo: () => {
-    const { past, future } = get();
-    if (future.length === 0) return null;
-    const next = future[0];
-    const entry = next[0];
-    set({
-      past: [...past, next],
-      future: future.slice(1),
-      ...entry.props,
-    });
-    return entry;
+    const s = get();
+    const entry = s.future[0];
+    if (!entry) return null;
+    set({ past: [...s.past, entry], future: s.future.slice(1), ...applyEntry(s, entry.id, entry.after) });
+    return { id: entry.id, props: entry.after };
   },
 }));

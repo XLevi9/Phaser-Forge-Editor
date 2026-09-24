@@ -1,640 +1,349 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
+import type React from 'react';
 import { useEditorStore, ObjectProps } from './store';
 import HierarchyPanel, { HierarchyItem } from './components/HierarchyPanel';
 import AssetBrowser from './components/AssetBrowser';
+import { InspectorField, ToolBtn, PresetButton, SetupDialog } from './components/Controls';
+import { beginDrag, clamp } from './beginDrag';
 
 type ToolMode = 'select' | 'move' | 'rotate' | 'scale';
+type DevStatus = 'idle' | 'starting' | 'running' | 'error';
+type BridgeStatus = 'disconnected' | 'connecting' | 'connected';
+type LiveProp = 'x' | 'y' | 'rotation' | 'scaleX' | 'scaleY' | 'alpha' | 'visible' | 'depth';
+
+interface BridgeObject {
+  id: string; name: string; type: string;
+  x: number; y: number; rotation: number; scaleX: number; scaleY: number;
+  alpha: number; visible: boolean; depth: number; originX: number; originY: number;
+  textureKey?: string; text?: string; displayWidth?: number; displayHeight?: number;
+}
+interface ScreenRect { x: number; y: number; width: number; height: number; }
+interface BridgeScene { key: string; active: boolean; visible: boolean; }
+type ShortcutKey = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey'>;
+
+const api = window.electronAPI;
 const round2 = (n: number) => Math.round(n * 100) / 100;
-const MIN_PANEL_H = 72;
-const MAX_PANEL_H = 480;
-const DEFAULT_PANEL_H = 180;
 
-// InspectorField
-interface FieldProps {
-  label: string; value: number | string | boolean;
-  type?: 'number' | 'color' | 'checkbox'; min?: number; max?: number; step?: number;
-  onChange: (v: any) => void;
-}
-function InspectorField({ label, value, type = 'number', min, max, step = 0.01, onChange }: FieldProps) {
-  if (type === 'checkbox') return (
-    <div className="flex items-center justify-between py-1">
-      <span className="text-xs text-gray-400 w-28">{label}</span>
-      <input type="checkbox" checked={value as boolean} onChange={e => onChange(e.target.checked)}
-        className="accent-blue-500 w-4 h-4" />
-    </div>
-  );
-  if (type === 'color') return (
-    <div className="flex items-center justify-between py-1">
-      <span className="text-xs text-gray-400 w-28">{label}</span>
-      <input type="color" value={value as string} onChange={e => onChange(e.target.value)}
-        className="w-10 h-7 rounded border border-gray-600 bg-transparent cursor-pointer" />
-    </div>
-  );
-  return (
-    <div className="flex items-center justify-between py-1">
-      <span className="text-xs text-gray-400 w-28">{label}</span>
-      <input type="number" value={value as number} min={min} max={max} step={step}
-        onChange={e => onChange(parseFloat(e.target.value))}
-        className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs text-right focus:outline-none focus:border-blue-500" />
-    </div>
-  );
+const PANEL_H = { min: 72, max: 480, initial: 180 };
+const SIDE_W = { min: 140, max: 400 };
+const BRIDGE_PING_MS = 2000;
+const BRIDGE_PING_ATTEMPTS = 15;
+const LIVE_REFRESH_MS = 500;
+
+const TOOLS: { mode: ToolMode; icon: string; label: string; key: string }[] = [
+  { mode: 'select', icon: '↖', label: 'Select (Q)', key: 'q' },
+  { mode: 'move', icon: '✥', label: 'Move (W)', key: 'w' },
+  { mode: 'rotate', icon: '↻', label: 'Rotate (E)', key: 'e' },
+  { mode: 'scale', icon: '⤢', label: 'Scale (R)', key: 'r' },
+];
+const ORIGIN_PRESETS = [
+  { l: 'TL', x: 0, y: 0 }, { l: 'TC', x: 0.5, y: 0 }, { l: 'TR', x: 1, y: 0 },
+  { l: 'CL', x: 0, y: 0.5 }, { l: 'C', x: 0.5, y: 0.5 }, { l: 'CR', x: 1, y: 0.5 },
+  { l: 'BL', x: 0, y: 1 }, { l: 'BC', x: 0.5, y: 1 }, { l: 'BR', x: 1, y: 1 },
+];
+const SCROLL_PRESETS = [{ l: 'UI (0)', v: 0 }, { l: 'World (1)', v: 1 }];
+
+/** Ref that always holds the latest value, so long-lived listeners never see stale state. */
+function useLatest<T>(value: T) {
+  const ref = useRef(value);
+  useLayoutEffect(() => { ref.current = value; });
+  return ref;
 }
 
-// ToolBtn
-function ToolBtn({ icon, label, active, onClick, disabled, extra = '' }:
-  { icon: string; label: string; active?: boolean; onClick: () => void; disabled?: boolean; extra?: string }) {
-  return (
-    <button title={label} onClick={onClick} disabled={disabled}
-      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-        active ? 'bg-blue-600 text-white shadow-[0_0_10px_rgba(59,130,246,0.4)]'
-          : 'text-gray-300 hover:bg-gray-700 hover:text-white'
-      } ${extra}`}>
-      <span>{icon}</span><span className="hidden xl:inline">{label}</span>
-    </button>
-  );
-}
+const isTyping = (t: EventTarget | null) =>
+  t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement;
 
-// SetupDialog
-function SetupDialog({ onConfirm, onCancel }: {
-  onConfirm: (w: number, h: number) => void; onCancel: () => void;
-}) {
-  const [w, setW] = useState(1280);
-  const [h, setH] = useState(720);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div className="bg-gray-800 border border-gray-600 rounded-lg shadow-2xl p-6 w-80">
-        <h2 className="text-sm font-semibold text-white mb-1">Project Canvas Size</h2>
-        <p className="text-xs text-gray-400 mb-5 leading-relaxed">
-          Match the size to your Phaser game config.<br />
-          Check <span className="text-gray-300 font-mono">GAME_WIDTH</span> / <span className="text-gray-300 font-mono">GAME_HEIGHT</span> in your constants.
-        </p>
-        <div className="space-y-3 mb-5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400">Width (px)</span>
-            <input type="number" value={w} onChange={e => setW(parseInt(e.target.value) || 1280)} min={100} max={7680}
-              className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-right text-white focus:outline-none focus:border-blue-500" />
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-400">Height (px)</span>
-            <input type="number" value={h} onChange={e => setH(parseInt(e.target.value) || 720)} min={100} max={4320}
-              className="w-28 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-right text-white focus:outline-none focus:border-blue-500" />
-          </div>
-          <div className="flex gap-2 flex-wrap pt-1">
-            {[{ l: '1280×720', w: 1280, h: 720 }, { l: '960×540', w: 960, h: 540 }, { l: '800×600', w: 800, h: 600 }].map(p => (
-              <button key={p.l} onClick={() => { setW(p.w); setH(p.h); }}
-                className="px-2 py-0.5 rounded text-[10px] border border-gray-600 text-gray-400 hover:border-blue-500 hover:text-blue-300 transition-colors">
-                {p.l}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="flex gap-2 justify-end">
-          <button onClick={onCancel} className="px-3 py-1.5 rounded text-xs text-gray-400 hover:bg-gray-700 transition-colors">Cancel</button>
-          <button onClick={() => onConfirm(w, h)} className="px-4 py-1.5 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors">Open Project</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// App
 export default function App() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const consoleEndRef = useRef<HTMLDivElement>(null);
   const store = useEditorStore();
 
   const [hierarchy, setHierarchy] = useState<HierarchyItem[]>([]);
-  const [toolMode, setToolModeState] = useState<ToolMode>('select');
+  const [toolMode, setToolMode] = useState<ToolMode>('select');
   const [projectFolder, setProjectFolder] = useState<string | null>(null);
   const [canvasSize, setCanvasSize] = useState({ w: 1280, h: 720 });
-  const [setupDialog, setSetupDialog] = useState<{ show: boolean; pending: string | null }>({ show: false, pending: null });
+  const [pendingSetupFolder, setPendingSetupFolder] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
+  const [isDraggingAsset, setIsDraggingAsset] = useState(false);
 
-  // Asset panel resize
-  const [panelH, setPanelH] = useState(DEFAULT_PANEL_H);
+  const [panelH, setPanelH] = useState(PANEL_H.initial);
   const [panelOpen, setPanelOpen] = useState(true);
-  const resizingRef = useRef(false);
-  const resizeStartRef = useRef({ y: 0, h: 0 });
-
-  // Hierarchy + Inspector panel widths
+  const [activeTab, setActiveTab] = useState<'assets' | 'console'>('assets');
   const [hierarchyW, setHierarchyW] = useState(208);
   const [inspectorW, setInspectorW] = useState(256);
-  const makeHResizer = (setter: (w: number) => void, dir: 'left' | 'right') => (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = dir === 'left' ? hierarchyW : inspectorW;
-    document.body.style.cursor = 'ew-resize';
-    document.body.style.userSelect = 'none';
-    const onMove = (ev: MouseEvent) => {
-      const delta = dir === 'left' ? ev.clientX - startX : startX - ev.clientX;
-      setter(Math.max(140, Math.min(400, startW + delta)));
-    };
-    const onUp = () => {
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
 
-  // Lock state
-  const [lockedIds, setLockedIds] = useState<Set<string>>(new Set());
+  const [devStatus, setDevStatus] = useState<DevStatus>('idle');
+  const [devUrl, setDevUrl] = useState<string | null>(null);
+  const [devLogs, setDevLogs] = useState('');
+  const [devScripts, setDevScripts] = useState<string[]>([]);
+  const [selectedScript, setSelectedScript] = useState('dev');
 
-  useEffect(() => {
-    toPhaser({ type: 'SET_LOCKED_IDS', ids: [...lockedIds] });
-  }, [lockedIds]);
-
-
-  const toggleLocked = useCallback((id: string) => {
-    setLockedIds(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, locked: !i.locked } : i));
-  }, []);
-
-  // Bridge (live mode)
-  type BridgeStatus = 'disconnected' | 'connecting' | 'connected';
-  interface BridgeObject { id: string; name: string; type: string; x: number; y: number; rotation: number; scaleX: number; scaleY: number; alpha: number; visible: boolean; depth: number; originX: number; originY: number; textureKey?: string; text?: string; displayWidth?: number; displayHeight?: number; }
-  interface BridgeScreenBounds { x: number; y: number; width: number; height: number; }
-  interface BridgeScene { key: string; active: boolean; visible: boolean; }
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('disconnected');
   const [bridgeScenes, setBridgeScenes] = useState<BridgeScene[]>([]);
   const [activeBridgeScene, setActiveBridgeScene] = useState<string | null>(null);
   const [bridgeObjects, setBridgeObjects] = useState<BridgeObject[]>([]);
-  const [bridgeSelectedId, setBridgeSelectedId] = useState<string | null>(null);
   const [bridgeSelected, setBridgeSelected] = useState<BridgeObject | null>(null);
-  const [bridgeScreenBounds, setBridgeScreenBounds] = useState<BridgeScreenBounds | null>(null);
-  const [liveEditMode, setLiveEditMode] = useState(false); // false = play, true = select objects
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const activeBridgeSceneRef = useRef<string | null>(null);
-  const bridgeSelectedIdRef = useRef<string | null>(null);
+  const [bridgeScreenBounds, setBridgeScreenBounds] = useState<ScreenRect | null>(null);
+  const [liveEditMode, setLiveEditMode] = useState(false);
+  const bridgeSelectedId = bridgeSelected?.id ?? null;
+
+  const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingSaveRef = useRef(false);
+  const pendingLoadFolderRef = useRef<string | null>(null);
   const liveDragRef = useRef<{
-    id: string;
-    pointerId: number;
-    startClientX: number;
-    startClientY: number;
-    startX: number;
-    startY: number;
+    id: string; pointerId: number;
+    startClientX: number; startClientY: number;
+    startX: number; startY: number;
     moved: boolean;
   } | null>(null);
-  const pingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const toGame = useCallback((msg: object) => {
-    iframeRef.current?.contentWindow?.postMessage(msg, '*');
-  }, []);
-
-  const requestBridgeObjects = useCallback((sceneKey: string) => {
-    toGame({ forge: true, type: 'FORGE_GET_OBJECTS', sceneKey });
-  }, [toGame]);
-
-  useEffect(() => { activeBridgeSceneRef.current = activeBridgeScene; }, [activeBridgeScene]);
-  useEffect(() => { bridgeSelectedIdRef.current = bridgeSelectedId; }, [bridgeSelectedId]);
-
-  // Dev server
-  type DevStatus = 'idle' | 'starting' | 'running' | 'error';
-  const [devStatus, setDevStatus] = useState<DevStatus>('idle');
-  const [devUrl, setDevUrl] = useState<string | null>(null);
-  const [devLogs, setDevLogs] = useState('');
-  const [activeTab, setActiveTab] = useState<'assets' | 'console'>('assets');
-  const consoleEndRef = useRef<HTMLDivElement>(null);
+  const send = useCallback((msg: object) => iframeRef.current?.contentWindow?.postMessage(msg, '*'), []);
+  const sendBridge = useCallback((msg: object) => send({ forge: true, ...msg }), [send]);
+  const requestBridgeObjects = useCallback((sceneKey: string) => sendBridge({ type: 'FORGE_GET_OBJECTS', sceneKey }), [sendBridge]);
+  const appendLog = useCallback((text: string) => setDevLogs(prev => prev + text), []);
+  const markDirty = () => setSaveStatus('unsaved');
+  const showConsole = () => { setActiveTab('console'); setPanelOpen(true); };
+  const patchItem = (id: string, patch: Partial<HierarchyItem>) =>
+    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i));
+  const clearLiveSelection = () => { setBridgeSelected(null); setBridgeScreenBounds(null); };
 
   useEffect(() => {
-    const api = (window as any).electronAPI;
-    api?.onDevServerOutput((text: string) => {
-      setDevLogs(prev => prev + text);
-      setTimeout(() => consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
-    });
-    api?.onDevServerStopped(() => {
-      setDevStatus('idle');
-      setDevUrl(null);
-    });
-    return () => api?.removeDevServerListeners();
-  }, []);
+    api.onDevServerOutput(appendLog);
+    api.onDevServerStopped(() => { setDevStatus('idle'); setDevUrl(null); });
+    return () => api.removeDevServerListeners();
+  }, [appendLog]);
 
+  useEffect(() => { consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [devLogs]);
+
+  const lockedKey = hierarchy.filter(i => i.locked).map(i => i.id).join('\n');
+  useEffect(() => {
+    send({ type: 'SET_LOCKED_IDS', ids: lockedKey ? lockedKey.split('\n') : [] });
+  }, [lockedKey, send]);
+
+  // Keep the live selection box in sync while the game animates the object.
   useEffect(() => {
     if (bridgeStatus !== 'connected' || !liveEditMode || !bridgeSelectedId) return;
-    const interval = setInterval(() => {
-      toGame({ forge: true, type: 'FORGE_SELECT', id: bridgeSelectedId, reason: 'refresh' });
-    }, 500);
-    return () => clearInterval(interval);
-  }, [bridgeStatus, liveEditMode, bridgeSelectedId, toGame]);
+    const timer = setInterval(() => sendBridge({ type: 'FORGE_SELECT', id: bridgeSelectedId, reason: 'refresh' }), LIVE_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [bridgeStatus, liveEditMode, bridgeSelectedId, sendBridge]);
 
-  // When game URL changes, reset bridge and start pinging
+  // New game URL: reset bridge state and ping until the bridge answers (it also announces FORGE_READY itself).
   useEffect(() => {
-    setBridgeStatus('disconnected');
+    setBridgeStatus(devUrl ? 'connecting' : 'disconnected');
     setBridgeScenes([]);
     setBridgeObjects([]);
-    setBridgeSelectedId(null);
     setBridgeSelected(null);
     setBridgeScreenBounds(null);
     if (!devUrl) return;
-    setBridgeStatus('connecting');
-    pingTimerRef.current = setTimeout(() => {
-      toGame({ forge: true, type: 'FORGE_PING' });
-      let attempts = 0;
-      const interval = setInterval(() => {
-        attempts++;
-        toGame({ forge: true, type: 'FORGE_PING' });
-        if (attempts >= 15) {
-          clearInterval(interval);
-          setBridgeStatus(prev => prev === 'connecting' ? 'disconnected' : prev);
-        }
-      }, 2000);
-      pingTimerRef.current = interval as any;
-    }, 1500);
-    return () => { if (pingTimerRef.current) clearInterval(pingTimerRef.current as any); };
-  }, [devUrl]);
+    let attempts = 0;
+    const timer = setInterval(() => {
+      sendBridge({ type: 'FORGE_PING' });
+      if (++attempts < BRIDGE_PING_ATTEMPTS) return;
+      clearInterval(timer);
+      setBridgeStatus(s => s === 'connecting' ? 'disconnected' : s);
+    }, BRIDGE_PING_MS);
+    pingTimerRef.current = timer;
+    return () => clearInterval(timer);
+  }, [devUrl, sendBridge]);
+
+  const setTool = (mode: ToolMode) => {
+    setToolMode(mode);
+    send({ type: 'SET_TOOL_MODE', mode });
+  };
+
+  const toggleSnap = () => {
+    send({ type: 'SET_SNAP', enabled: !store.snapEnabled });
+    store.toggleSnap();
+  };
+
+  const applyHistory = (entry: { id: string; props: ObjectProps } | null) => {
+    if (!entry) return;
+    send({ type: 'SET_PROPERTIES', id: entry.id, ...entry.props });
+    patchItem(entry.id, { visible: entry.props.visible });
+    markDirty();
+  };
+  const undo = () => applyHistory(store.undo());
+  const redo = () => applyHistory(store.redo());
+
+  const updateField = (props: Partial<ObjectProps>, commit = false) => {
+    const id = store.selectedId;
+    if (!id) return;
+    store.updateProperties(props);
+    send({ type: 'SET_PROPERTIES', id, ...props });
+    if (props.visible !== undefined) patchItem(id, { visible: props.visible });
+    if (commit) store.commit();
+    markDirty();
+  };
+
+  const selectObject = (id: string) => send({ type: 'SELECT_OBJECT', id });
+
+  const deleteObject = (id: string) => {
+    send({ type: 'DELETE_OBJECT', id });
+    setHierarchy(prev => prev.filter(i => i.id !== id));
+    markDirty();
+  };
+
+  const duplicateObject = (id: string) =>
+    send({ type: 'DUPLICATE_OBJECT', id, newId: `${id.replace(/_copy_\d+$/, '')}_copy_${Date.now()}` });
+
+  const renameObject = (id: string, name: string) => {
+    send({ type: 'RENAME_OBJECT', id, name });
+    patchItem(id, { name });
+    markDirty();
+  };
+
+  const toggleVisible = (id: string) => {
+    const item = hierarchy.find(i => i.id === id);
+    if (!item) return;
+    const visible = !item.visible;
+    if (id === store.selectedId) return updateField({ visible }, true);
+    send({ type: 'SET_PROPERTIES', id, visible });
+    patchItem(id, { visible });
+    markDirty();
+  };
+
+  const toggleLocked = (id: string) =>
+    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, locked: !i.locked } : i));
+
+  const handleSave = () => {
+    if (!projectFolder || devUrl) return;
+    pendingSaveRef.current = true;
+    send({ type: 'GET_SCENE_STATE' });
+  };
+
+  const loadScene = async (folder: string) => {
+    const data = await api.loadScene(folder);
+    setSaveStatus('saved');
+    if (!data?.objects?.length) return;
+    const objects = await Promise.all(data.objects.map(async obj =>
+      obj.kind === 'sprite' && obj.assetFullPath
+        ? { ...obj, dataUrl: (await api.fileToDataUrl(obj.assetFullPath)) ?? '' }
+        : obj));
+    send({ type: 'LOAD_SCENE', objects });
+  };
+
+  // Prefer a saved choice, then `*:dev:*` variants (monorepos), then plain `dev`.
+  const loadDevScripts = async (folder: string, saved?: string) => {
+    const scripts = await api.readProjectScripts(folder);
+    setDevScripts(scripts);
+    setSelectedScript(
+      (saved && scripts.includes(saved) ? saved : undefined) ??
+      scripts.find(s => /:dev(:|$)/.test(s)) ??
+      (scripts.includes('dev') ? 'dev' : scripts[0]) ??
+      'dev');
+  };
+
+  const changeScript = (script: string) => {
+    setSelectedScript(script);
+    if (projectFolder) {
+      api.writeProjectConfig(projectFolder, { canvasWidth: canvasSize.w, canvasHeight: canvasSize.h, devScript: script });
+    }
+  };
+
+  const stopDev = async () => {
+    await api.stopDevServer();
+    setDevStatus('idle');
+    setDevUrl(null);
+  };
 
   const handleRunStop = async () => {
-    const api = (window as any).electronAPI;
-    if (devStatus === 'running' || devStatus === 'starting') {
-      await api?.stopDevServer();
-      setDevStatus('idle');
-      setDevUrl(null);
+    if (devStatus === 'running' || devStatus === 'starting') return stopDev();
+    if (!projectFolder) return;
+    setDevStatus('starting');
+    setDevLogs('');
+    showConsole();
+    const result = await api.startDevServer(projectFolder, selectedScript);
+    if (result.ok && result.url) {
+      setDevStatus('running');
+      setDevUrl(result.url);
     } else {
-      if (!projectFolder) return;
-      setDevStatus('starting');
-      setDevLogs('');
-      setActiveTab('console');
-      const result = await api?.startDevServer(projectFolder);
-      if (result?.ok && result.url) {
-        setDevStatus('running');
-        setDevUrl(result.url);
-      } else {
-        setDevStatus('error');
-        setDevLogs(prev => prev + `\n[Error: ${result?.error ?? 'Unknown error'}]\n`);
-      }
+      setDevStatus('error');
+      appendLog(`\n[Error: ${result.error ?? 'Unknown error'}]\n`);
     }
   };
 
-  const handleInstallBridge = async () => {
+  const installBridge = async () => {
     if (!projectFolder) return;
-    const r = await (window as any).electronAPI?.installBridge(projectFolder);
-    if (r?.ok) {
-      setBridgeStatus('disconnected');
-      setDevLogs(prev => prev + "\n[Bridge installed: phaser-forge-bridge.js]\n[Import it from your game entry, e.g. src/main.js: import '../phaser-forge-bridge.js']\n");
-      setActiveTab('console');
-      if (!panelOpen) setPanelOpen(true);
-    } else {
-      setDevLogs(prev => prev + `\n[Bridge install failed: ${r?.error ?? 'Unknown error'}]\n`);
-      setActiveTab('console');
-      if (!panelOpen) setPanelOpen(true);
-    }
+    const r = await api.installBridge(projectFolder);
+    appendLog(r.ok
+      ? "\n[Bridge installed: phaser-forge-bridge.js]\n[Import it from your game entry, e.g. src/main.js: import '../phaser-forge-bridge.js']\n"
+      : `\n[Bridge install failed: ${r.error ?? 'Unknown error'}]\n`);
+    showConsole();
   };
 
-  // Drag overlay
-  const [isDraggingAsset, setIsDraggingAsset] = useState(false);
-
-  // Save state
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
-  const pendingSaveRef = useRef(false);
-  const pendingLoadFolderRef = useRef<string | null>(null);
-  const hierarchyRef = useRef<HierarchyItem[]>([]);
-  const projectFolderRef = useRef<string | null>(null);
-  useEffect(() => { projectFolderRef.current = projectFolder; }, [projectFolder]);
-  useEffect(() => {
-    hierarchyRef.current = hierarchy;
-    if (hierarchy.length > 0) setSaveStatus('unsaved');
-  }, [hierarchy]);
-
-  const designSrc = `./phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
-  const iframeSrc = devUrl ?? designSrc;
-
-  const toPhaser = useCallback((msg: object) => {
-    iframeRef.current?.contentWindow?.postMessage(msg, '*');
-  }, []);
-
-  const setTool = useCallback((mode: ToolMode) => {
-    setToolModeState(mode);
-    toPhaser({ type: 'SET_TOOL_MODE', mode });
-  }, [toPhaser]);
-
-  // Messages from Phaser
-  useEffect(() => {
-    const onMsg = (ev: MessageEvent) => {
-      const m = ev.data;
-
-      // Bridge messages from live game
-      if (m?.forge) {
-        if (m.type === 'FORGE_READY' || m.type === 'FORGE_PONG') {
-          setBridgeStatus('connected');
-          if (pingTimerRef.current) { clearTimeout(pingTimerRef.current); pingTimerRef.current = null; }
-          toGame({ forge: true, type: 'FORGE_GET_SCENES' });
-        }
-        if (m.type === 'FORGE_SCENES') {
-          setBridgeScenes(m.scenes ?? []);
-          const active = (m.scenes as BridgeScene[]).find(s => s.active)?.key ?? m.scenes?.[0]?.key ?? null;
-          setActiveBridgeScene(active);
-          if (active) requestBridgeObjects(active);
-        }
-        if (m.type === 'FORGE_OBJECTS') {
-          setBridgeObjects(m.objects ?? []);
-          setActiveBridgeScene(m.sceneKey);
-        }
-        if (m.type === 'FORGE_SELECTED') {
-          setBridgeSelected(m.props ?? null);
-          setBridgeSelectedId(m.id ?? null);
-          const shouldSwitchScene = m.reason !== 'refresh' && m.reason !== 'move';
-          if (m.sceneKey && shouldSwitchScene) {
-            setActiveBridgeScene(m.sceneKey);
-            requestBridgeObjects(m.sceneKey);
-          }
-          if (m.screenBounds) {
-            setBridgeScreenBounds({
-              x: m.screenBounds.x,
-              y: m.screenBounds.y,
-              width: m.screenBounds.width,
-              height: m.screenBounds.height,
-            });
-          } else {
-            setBridgeScreenBounds(null);
-          }
-        }
-        if (m.type === 'FORGE_DESELECTED') {
-          setBridgeSelected(null);
-          setBridgeSelectedId(null);
-          setBridgeScreenBounds(null);
-        }
-        if (m.type === 'FORGE_PROP_SET' && bridgeSelectedIdRef.current === m.id) {
-          setBridgeSelected(m.props ?? null);
-          if (m.screenBounds) {
-            setBridgeScreenBounds({
-              x: m.screenBounds.x,
-              y: m.screenBounds.y,
-              width: m.screenBounds.width,
-              height: m.screenBounds.height,
-            });
-          }
-          if (m.sceneKey) requestBridgeObjects(m.sceneKey);
-          else if (activeBridgeSceneRef.current) requestBridgeObjects(activeBridgeSceneRef.current);
-        }
-        if (m.type === 'FORGE_PICK_DEBUG') {
-          const scenes = (m.scenes ?? []).map((s: any) => `${s.key}:${s.objects}`).join(', ');
-          setDevLogs(prev => prev + `\n[Bridge pick missed at ${m.x},${m.y}; scenes ${scenes || 'none'}]\n`);
-        }
-        return;
-      }
-
-      if (!m?.type) return;
-      switch (m.type) {
-        case 'SCENE_READY':
-          setHierarchy((m.hierarchy ?? []).map((i: any) => ({ ...i, visible: true, locked: false })));
-          if (pendingLoadFolderRef.current) {
-            const f = pendingLoadFolderRef.current;
-            pendingLoadFolderRef.current = null;
-            loadSceneFromFile(f);
-          }
-          break;
-        case 'OBJECT_SELECTED':
-          store.setSelectedObject(m.id, {
-            x: round2(m.x ?? 0), y: round2(m.y ?? 0),
-            rotation: round2(m.rotation ?? 0),
-            scaleX: round2(m.scaleX ?? 1), scaleY: round2(m.scaleY ?? 1),
-            alpha: round2(m.alpha ?? 1), tint: m.tint ?? '#ffffff',
-            visible: m.visible ?? true, depth: m.depth ?? 0,
-            originX: round2(m.originX ?? 0.5), originY: round2(m.originY ?? 0.5),
-            flipX: m.flipX ?? false, flipY: m.flipY ?? false,
-            scrollFactorX: m.scrollFactorX ?? 1, scrollFactorY: m.scrollFactorY ?? 1,
-          }, m.texW ?? 0, m.texH ?? 0); break;
-        case 'OBJECT_DESELECTED': store.setSelectedObject(null); break;
-        case 'OBJECT_TRANSFORMED': {
-          const cur = useEditorStore.getState();
-          if (m.id !== cur.selectedId) break;
-          store.updateProperties({
-            x: m.x !== undefined ? round2(m.x) : cur.x,
-            y: m.y !== undefined ? round2(m.y) : cur.y,
-            rotation: m.rotation !== undefined ? round2(m.rotation) : cur.rotation,
-            scaleX: m.scaleX !== undefined ? round2(m.scaleX) : cur.scaleX,
-            scaleY: m.scaleY !== undefined ? round2(m.scaleY) : cur.scaleY,
-          }); break;
-        }
-        case 'PUSH_HISTORY': {
-          const s = useEditorStore.getState();
-          if (!s.selectedId) break;
-          store.pushHistory({
-            id: s.selectedId,
-            props: { x: s.x, y: s.y, rotation: s.rotation, scaleX: s.scaleX,
-                     scaleY: s.scaleY, alpha: s.alpha, tint: s.tint, visible: s.visible,
-                     depth: s.depth, originX: s.originX, originY: s.originY,
-                     flipX: s.flipX, flipY: s.flipY,
-                     scrollFactorX: s.scrollFactorX, scrollFactorY: s.scrollFactorY },
-          }); break;
-        }
-        case 'OBJECT_ADDED':
-          setHierarchy(prev => [...prev, { id: m.id, name: m.name, type: m.objType, visible: true, locked: false }]); break;
-        case 'OBJECT_REMOVED':
-          setHierarchy(prev => prev.filter(i => i.id !== m.id));
-          if (useEditorStore.getState().selectedId === m.id) store.setSelectedObject(null); break;
-        case 'OBJECT_RENAMED':
-          setHierarchy(prev => prev.map(i => i.id === m.id ? { ...i, name: m.name } : i)); break;
-        case 'SCENE_STATE': {
-          if (!pendingSaveRef.current) break;
-          pendingSaveRef.current = false;
-          setSaveStatus('saving');
-          const folder = projectFolderRef.current;
-          if (!folder) { setSaveStatus('unsaved'); break; }
-          (async () => {
-            const hier = hierarchyRef.current;
-            const objects = (m.objects as any[]).map(obj => ({
-              ...obj,
-              name: hier.find(h => h.id === obj.id)?.name ?? obj.name,
-            }));
-            const saved = await (window as any).electronAPI?.saveScene(folder, objects);
-            setSaveStatus(saved ? 'saved' : 'unsaved');
-          })();
-          break;
-        }
-      }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
-  }, []);
-
-  // Keyboard
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
-      if (e.ctrlKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        if (projectFolderRef.current) {
-          pendingSaveRef.current = true;
-          toPhaser({ type: 'GET_SCENE_STATE' });
-        }
-        return;
-      }
-      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        const entry = useEditorStore.getState().undo();
-        if (entry) toPhaser({ type: 'SET_PROPERTIES', id: entry.id, ...entry.props }); return;
-      }
-      if ((e.ctrlKey && e.key.toLowerCase() === 'y') ||
-          (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z')) {
-        e.preventDefault();
-        const entry = useEditorStore.getState().redo();
-        if (entry) toPhaser({ type: 'SET_PROPERTIES', id: entry.id, ...entry.props }); return;
-      }
-      switch (e.key.toLowerCase()) {
-        case 'q': setTool('select'); break;
-        case 'w': setTool('move'); break;
-        case 'e': setTool('rotate'); break;
-        case 'r': setTool('scale'); break;
-        case 'f': toPhaser({ type: 'RESET_CAMERA' }); break;
-        case 'delete': { const id = useEditorStore.getState().selectedId; if (id) handleDeleteObject(id); break; }
-        case 'escape': store.setSelectedObject(null); toPhaser({ type: 'DESELECT_ALL' }); break;
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  // Clear drag state on global dragend
-  useEffect(() => {
-    const onDragEnd = () => setIsDraggingAsset(false);
-    window.addEventListener('dragend', onDragEnd);
-    return () => window.removeEventListener('dragend', onDragEnd);
-  }, []);
-
-  // Panel resize (mouse drag on handle)
-  const startPanelResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    resizingRef.current = true;
-    resizeStartRef.current = { y: e.clientY, h: panelH };
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-
-    const onMove = (ev: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const delta = resizeStartRef.current.y - ev.clientY;
-      setPanelH(Math.max(MIN_PANEL_H, Math.min(MAX_PANEL_H, resizeStartRef.current.h + delta)));
-    };
-    const onUp = () => {
-      resizingRef.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+  const openProject = async (folder: string, config: ProjectConfig) => {
+    if (devStatus !== 'idle') await stopDev();
+    loadDevScripts(folder, config.devScript);
+    setProjectFolder(folder);
+    setCanvasSize({ w: config.canvasWidth, h: config.canvasHeight });
+    setHierarchy([]);
+    store.setSelectedObject(null);
+    useEditorStore.setState({ past: [], future: [] });
+    pendingLoadFolderRef.current = folder;
+    // Otherwise the iframe reloads (new size or leaving live mode) and its SCENE_READY triggers the load.
+    const sizeChanged = config.canvasWidth !== canvasSize.w || config.canvasHeight !== canvasSize.h;
+    if (!sizeChanged && !devUrl) send({ type: 'RESET_SCENE' });
   };
 
-  // Save
-  const handleSave = () => {
-    if (!projectFolder) return;
-    pendingSaveRef.current = true;
-    toPhaser({ type: 'GET_SCENE_STATE' });
-  };
-
-  // Load scene from file into phaser
-  const loadSceneFromFile = async (folder: string) => {
-    const data = await (window as any).electronAPI?.loadScene(folder);
-    if (!data?.objects?.length) return;
-    const objects = await Promise.all(data.objects.map(async (obj: any) => {
-      if (obj.kind !== 'sprite' || !obj.assetFullPath) return obj;
-      const dataUrl = await (window as any).electronAPI?.fileToDataUrl(obj.assetFullPath);
-      return { ...obj, dataUrl: dataUrl ?? '' };
-    }));
-    toPhaser({ type: 'LOAD_SCENE', objects });
-    setSaveStatus('saved');
-  };
-
-  // Open project
   const handleOpenProject = async () => {
-    const folder = await (window as any).electronAPI?.openFolder();
+    const folder = await api.openFolder();
     if (!folder) return;
-    const config = await (window as any).electronAPI?.readProjectConfig(folder);
-    if (config?.canvasWidth && config?.canvasHeight) {
-      const sizeChanged = config.canvasWidth !== canvasSize.w || config.canvasHeight !== canvasSize.h;
-      setProjectFolder(folder);
-      setCanvasSize({ w: config.canvasWidth, h: config.canvasHeight });
-      setHierarchy([]);
-      store.setSelectedObject(null);
-      pendingLoadFolderRef.current = folder;
-      if (!sizeChanged) toPhaser({ type: 'RESET_SCENE' });
-      // if sizeChanged: iframe reloads → SCENE_READY fires → load triggered there
-    } else {
-      setSetupDialog({ show: true, pending: folder });
-    }
+    const config = await api.readProjectConfig(folder);
+    if (config?.canvasWidth && config?.canvasHeight) openProject(folder, config);
+    else setPendingSetupFolder(folder);
   };
 
   const handleSetupConfirm = async (w: number, h: number) => {
-    const folder = setupDialog.pending!;
-    await (window as any).electronAPI?.writeProjectConfig(folder, { canvasWidth: w, canvasHeight: h });
-    setProjectFolder(folder);
-    setCanvasSize({ w, h });
-    setHierarchy([]);
-    store.setSelectedObject(null);
-    setSetupDialog({ show: false, pending: null });
-    pendingLoadFolderRef.current = folder;
+    const folder = pendingSetupFolder;
+    if (!folder) return;
+    setPendingSetupFolder(null);
+    const config = { canvasWidth: w, canvasHeight: h };
+    await api.writeProjectConfig(folder, config);
+    openProject(folder, config);
   };
 
-  // Hierarchy actions
-  const handleSelectObject = (id: string) => toPhaser({ type: 'SELECT_OBJECT', id });
-  const handleDeleteObject = (id: string) => {
-    toPhaser({ type: 'DELETE_OBJECT', id });
-    setHierarchy(prev => prev.filter(i => i.id !== id));
-    if (store.selectedId === id) store.setSelectedObject(null);
-  };
-  const handleDuplicateObject = (id: string) =>
-    toPhaser({ type: 'DUPLICATE_OBJECT', id, newId: `${id}_copy_${Date.now()}` });
-  const handleRenameObject = (id: string, name: string) => {
-    toPhaser({ type: 'RENAME_OBJECT', id, name });
-    setHierarchy(prev => prev.map(i => i.id === id ? { ...i, name } : i));
-  };
-
-  // Drop asset on viewport (via overlay div)
-  const handleDropAsset = (e: React.DragEvent) => {
+  const readDroppedAsset = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingAsset(false);
     const raw = e.dataTransfer.getData('application/phaser-asset');
-    if (!raw) return;
-    const file = JSON.parse(raw);
-
-    // Letterbox-aware coordinate conversion
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const ir = iframe.getBoundingClientRect();
-    const gameAspect = canvasSize.w / canvasSize.h;
-    const iframeAspect = ir.width / ir.height;
-    let displayW: number, displayH: number, offsetX: number, offsetY: number;
-    if (iframeAspect > gameAspect) {
-      displayH = ir.height; displayW = displayH * gameAspect;
-      offsetX = (ir.width - displayW) / 2; offsetY = 0;
-    } else {
-      displayW = ir.width; displayH = displayW / gameAspect;
-      offsetX = 0; offsetY = (ir.height - displayH) / 2;
-    }
-    const scale = displayW / canvasSize.w;
-    const canvasX = Math.round((e.clientX - ir.left - offsetX) / scale);
-    const canvasY = Math.round((e.clientY - ir.top - offsetY) / scale);
-
-    toPhaser({ type: 'ADD_SPRITE_FROM_ASSET', file, x: canvasX, y: canvasY });
+    return raw ? JSON.parse(raw) : null;
   };
 
-  // Drop asset on hierarchy = add at canvas center
+  const handleDropOnViewport = (e: React.DragEvent) => {
+    const file = readDroppedAsset(e);
+    const rect = iframeRef.current?.getBoundingClientRect();
+    if (file && rect) send({ type: 'ADD_SPRITE_FROM_ASSET', file, screenX: e.clientX - rect.left, screenY: e.clientY - rect.top });
+  };
+
   const handleDropOnHierarchy = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDraggingAsset(false);
-    const raw = e.dataTransfer.getData('application/phaser-asset');
-    if (!raw) return;
-    const file = JSON.parse(raw);
-    toPhaser({ type: 'ADD_SPRITE_FROM_ASSET', file, x: canvasSize.w / 2, y: canvasSize.h / 2 });
+    const file = readDroppedAsset(e);
+    if (file) send({ type: 'ADD_SPRITE_FROM_ASSET', file });
   };
 
-  const handleLiveViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (liveDragRef.current?.moved) {
-      liveDragRef.current = null;
-      return;
-    }
+  const selectLiveObject = (obj: BridgeObject) => {
+    setBridgeSelected(obj);
+    sendBridge({ type: 'FORGE_SELECT', id: obj.id });
+  };
+
+  const changeLiveScene = (key: string) => {
+    setActiveBridgeScene(key);
+    clearLiveSelection();
+    requestBridgeObjects(key);
+  };
+
+  const setLiveProp = (prop: LiveProp, value: number | boolean) => {
+    if (!bridgeSelected) return;
+    setBridgeSelected({ ...bridgeSelected, [prop]: value });
+    sendBridge({ type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop, value });
+  };
+
+  const handleLiveClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const drag = liveDragRef.current;
     liveDragRef.current = null;
-    if (!activeBridgeScene || bridgeStatus !== 'connected') return;
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const rect = iframe.getBoundingClientRect();
-    toGame({
-      forge: true,
+    const rect = iframeRef.current?.getBoundingClientRect();
+    if (drag?.moved || !activeBridgeScene || bridgeStatus !== 'connected' || !rect) return;
+    sendBridge({
       type: 'FORGE_PICK_OBJECT',
       sceneKey: activeBridgeScene,
       viewportX: e.clientX - rect.left,
@@ -642,15 +351,13 @@ export default function App() {
     });
   };
 
-  const pointInsideBounds = (x: number, y: number, b: BridgeScreenBounds) =>
-    x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
-
   const handleLivePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!bridgeSelected || !bridgeScreenBounds || !overlayRef.current) return;
-    const overlayRect = overlayRef.current.getBoundingClientRect();
-    const localX = e.clientX - overlayRect.left;
-    const localY = e.clientY - overlayRect.top;
-    if (!pointInsideBounds(localX, localY, bridgeScreenBounds)) return;
+    const b = bridgeScreenBounds;
+    const overlay = overlayRef.current?.getBoundingClientRect();
+    if (!bridgeSelected || !b || !overlay) return;
+    const x = e.clientX - overlay.left;
+    const y = e.clientY - overlay.top;
+    if (x < b.x || x > b.x + b.width || y < b.y || y > b.y + b.height) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     liveDragRef.current = {
@@ -669,63 +376,174 @@ export default function App() {
     if (!drag || drag.pointerId !== e.pointerId) return;
     const dx = e.clientX - drag.startClientX;
     const dy = e.clientY - drag.startClientY;
-    if (Math.abs(dx) + Math.abs(dy) < 2) return;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 2) return;
     drag.moved = true;
-    toGame({
-      forge: true,
-      type: 'FORGE_MOVE_OBJECT',
-      id: drag.id,
-      startX: drag.startX,
-      startY: drag.startY,
-      dx,
-      dy,
-    });
+    sendBridge({ type: 'FORGE_MOVE_OBJECT', id: drag.id, startX: drag.startX, startY: drag.startY, dx, dy });
   };
 
   const handleLivePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = liveDragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
-    toGame({ forge: true, type: 'FORGE_SELECT', id: drag.id, reason: 'refresh' });
-    if (activeBridgeSceneRef.current) requestBridgeObjects(activeBridgeSceneRef.current);
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    if (drag.moved && activeBridgeScene) requestBridgeObjects(activeBridgeScene);
   };
 
-  const handleLivePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
-    const drag = liveDragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    liveDragRef.current = null;
+  const onBridgeMessage = (m: any) => {
+    switch (m.type) {
+      case 'FORGE_READY':
+      case 'FORGE_PONG':
+        setBridgeStatus('connected');
+        if (pingTimerRef.current) clearInterval(pingTimerRef.current);
+        sendBridge({ type: 'FORGE_GET_SCENES' });
+        break;
+      case 'FORGE_SCENES': {
+        const scenes: BridgeScene[] = m.scenes ?? [];
+        const active = scenes.find(s => s.active)?.key ?? scenes[0]?.key ?? null;
+        setBridgeScenes(scenes);
+        setActiveBridgeScene(active);
+        if (active) requestBridgeObjects(active);
+        break;
+      }
+      case 'FORGE_OBJECTS':
+        setBridgeObjects(m.objects ?? []);
+        setActiveBridgeScene(m.sceneKey);
+        break;
+      case 'FORGE_SELECTED':
+        setBridgeSelected(m.props ?? null);
+        setBridgeScreenBounds(m.screenBounds ?? null);
+        if (m.sceneKey && m.reason !== 'refresh' && m.reason !== 'move') {
+          setActiveBridgeScene(m.sceneKey);
+          requestBridgeObjects(m.sceneKey);
+        }
+        break;
+      case 'FORGE_DESELECTED':
+        clearLiveSelection();
+        break;
+      case 'FORGE_PROP_SET': {
+        if (m.id !== bridgeSelectedId) break;
+        setBridgeSelected(m.props ?? null);
+        if (m.screenBounds) setBridgeScreenBounds(m.screenBounds);
+        const sceneKey = m.sceneKey ?? activeBridgeScene;
+        if (sceneKey) requestBridgeObjects(sceneKey);
+        break;
+      }
+    }
   };
 
-  // Inspector field
-  const updateField = (key: keyof ObjectProps, value: any) => {
-    store.updateProperties({ [key]: value });
-    if (store.selectedId) toPhaser({ type: 'SET_PROPERTIES', id: store.selectedId, [key]: value });
+  /** Returns true when the key was an editor shortcut. */
+  const handleShortcut = useLatest((k: ShortcutKey) => {
+    if (devUrl) return false;
+    const key = k.key.toLowerCase();
+    if (k.ctrlKey || k.metaKey) {
+      if (key === 's') handleSave();
+      else if (key === 'z' && !k.shiftKey) undo();
+      else if (key === 'y' || (key === 'z' && k.shiftKey)) redo();
+      else return false;
+      return true;
+    }
+    const tool = TOOLS.find(t => t.key === key);
+    if (tool) setTool(tool.mode);
+    else if (key === 'f') send({ type: 'RESET_CAMERA' });
+    else if (key === 'delete' && store.selectedId) deleteObject(store.selectedId);
+    else if (key === 'escape') send({ type: 'DESELECT_ALL' });
+    else return false;
+    return true;
+  });
+
+  const onMessage = useLatest((m: any) => {
+    if (!m?.type) return;
+    if (m.forge) return onBridgeMessage(m);
+    switch (m.type) {
+      case 'KEYDOWN':
+        handleShortcut.current(m);
+        break;
+      case 'SCENE_READY': {
+        setHierarchy([]);
+        send({ type: 'SET_TOOL_MODE', mode: toolMode });
+        send({ type: 'SET_SNAP', enabled: store.snapEnabled });
+        const folder = pendingLoadFolderRef.current;
+        pendingLoadFolderRef.current = null;
+        if (folder) loadScene(folder);
+        break;
+      }
+      case 'OBJECT_SELECTED':
+        store.setSelectedObject(m.id, {
+          x: round2(m.x), y: round2(m.y), rotation: round2(m.rotation),
+          scaleX: round2(m.scaleX), scaleY: round2(m.scaleY), alpha: round2(m.alpha),
+          tint: m.tint, visible: m.visible, depth: m.depth,
+          originX: round2(m.originX), originY: round2(m.originY),
+          flipX: m.flipX, flipY: m.flipY,
+          scrollFactorX: m.scrollFactorX, scrollFactorY: m.scrollFactorY,
+        }, m.texW, m.texH);
+        break;
+      case 'OBJECT_DESELECTED':
+        store.setSelectedObject(null);
+        break;
+      case 'OBJECT_TRANSFORMED': {
+        if (m.id !== store.selectedId) break;
+        const props: Partial<ObjectProps> = {};
+        for (const k of ['x', 'y', 'rotation', 'scaleX', 'scaleY'] as const) {
+          if (m[k] !== undefined) props[k] = round2(m[k]);
+        }
+        store.updateProperties(props);
+        break;
+      }
+      case 'PUSH_HISTORY':
+        store.commit();
+        markDirty();
+        break;
+      case 'OBJECT_ADDED':
+        setHierarchy(prev => [...prev, { id: m.id, name: m.name, type: m.objType, visible: m.visible ?? true, locked: false }]);
+        if (!m.loaded) markDirty();
+        break;
+      case 'SCENE_STATE':
+        if (!pendingSaveRef.current || !projectFolder) break;
+        pendingSaveRef.current = false;
+        setSaveStatus('saving');
+        api.saveScene(projectFolder, m.objects).then(ok => setSaveStatus(ok ? 'saved' : 'unsaved'));
+        break;
+    }
+  });
+
+  useEffect(() => {
+    const handleMessage = (ev: MessageEvent) => onMessage.current(ev.data);
+    const handleKey = (ev: KeyboardEvent) => {
+      if (!isTyping(ev.target) && handleShortcut.current(ev)) ev.preventDefault();
+    };
+    const handleDragEnd = () => setIsDraggingAsset(false);
+    window.addEventListener('message', handleMessage);
+    window.addEventListener('keydown', handleKey);
+    window.addEventListener('dragend', handleDragEnd);
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      window.removeEventListener('keydown', handleKey);
+      window.removeEventListener('dragend', handleDragEnd);
+    };
+  }, [onMessage, handleShortcut]);
+
+  const startSideResize = (e: React.MouseEvent, side: 'hierarchy' | 'inspector') => {
+    const w0 = side === 'hierarchy' ? hierarchyW : inspectorW;
+    const setW = side === 'hierarchy' ? setHierarchyW : setInspectorW;
+    const dir = side === 'hierarchy' ? 1 : -1;
+    beginDrag(e, 'ew-resize', dx => setW(clamp(w0 + dir * dx, SIDE_W.min, SIDE_W.max)));
   };
 
-  const handleSnap = () => {
-    store.toggleSnap();
-    toPhaser({ type: 'SET_SNAP', enabled: !store.snapEnabled });
+  const startPanelResize = (e: React.MouseEvent) => {
+    const h0 = panelH;
+    beginDrag(e, 'ns-resize', (_dx, dy) => setPanelH(clamp(h0 - dy, PANEL_H.min, PANEL_H.max)));
   };
 
-  const handleIframeLoad = () => {
-    toPhaser({ type: 'SET_TOOL_MODE', mode: toolMode });
-    toPhaser({ type: 'SET_SNAP', enabled: store.snapEnabled });
-    toPhaser({ type: 'SET_LOCKED_IDS', ids: [...lockedIds] });
-  };
-
+  const iframeSrc = devUrl ?? `./phaser.html?w=${canvasSize.w}&h=${canvasSize.h}`;
   const { selectedId, x, y, rotation, scaleX, scaleY, alpha, tint, visible, depth, originX, originY, flipX, flipY, scrollFactorX, scrollFactorY, texW, texH, snapEnabled, past, future } = store;
+  const commit = store.commit;
 
   return (
     <div className="flex h-screen w-screen flex-col bg-gray-900 text-white select-none overflow-hidden">
 
-      {setupDialog.show && (
-        <SetupDialog
-          onConfirm={handleSetupConfirm}
-          onCancel={() => setSetupDialog({ show: false, pending: null })}
-        />
+      {pendingSetupFolder && (
+        <SetupDialog onConfirm={handleSetupConfirm} onCancel={() => setPendingSetupFolder(null)} />
       )}
 
-      {/* ── Toolbar ── */}
       <header className="toolbar flex h-11 items-center gap-1 px-3 flex-shrink-0">
         <span className="font-bold text-sm text-white mr-3 tracking-wide whitespace-nowrap">⚡ Phaser Forge</span>
 
@@ -743,42 +561,52 @@ export default function App() {
         <div className="w-px h-5 bg-gray-700 mr-1" />
 
         <div className="flex items-center gap-0.5">
-          <ToolBtn icon="↖" label="Select (Q)" active={toolMode === 'select'} onClick={() => setTool('select')} />
-          <ToolBtn icon="✥" label="Move (W)" active={toolMode === 'move'} onClick={() => setTool('move')} />
-          <ToolBtn icon="↻" label="Rotate (E)" active={toolMode === 'rotate'} onClick={() => setTool('rotate')} />
-          <ToolBtn icon="⤢" label="Scale (R)" active={toolMode === 'scale'} onClick={() => setTool('scale')} />
+          {TOOLS.map(t => (
+            <ToolBtn key={t.mode} icon={t.icon} label={t.label} active={toolMode === t.mode} onClick={() => setTool(t.mode)} />
+          ))}
         </div>
 
         <div className="w-px h-5 bg-gray-700 mx-1" />
 
-        <button onClick={handleSnap} title="Snap to Grid"
+        <button onClick={toggleSnap} title="Snap to Grid"
           className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium border transition-all ${
             snapEnabled ? 'border-blue-500 bg-blue-900/40 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
           ⊞ <span className="hidden xl:inline">Snap</span>
         </button>
 
-        <button onClick={() => toPhaser({ type: 'RESET_CAMERA' })} title="Reset Camera View (F)"
+        <button onClick={() => send({ type: 'RESET_CAMERA' })} title="Reset Camera View (F)"
           className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium border border-gray-700 text-gray-400 hover:bg-gray-700 transition-all ml-0.5">
           ⌂ <span className="hidden xl:inline">Reset View</span>
         </button>
 
         <div className="flex items-center gap-0.5 ml-1">
-          <ToolBtn icon="↩" label="Undo" disabled={past.length === 0}
-            onClick={() => { const e = store.undo(); if (e) toPhaser({ type: 'SET_PROPERTIES', id: e.id, ...e.props }); }} />
-          <ToolBtn icon="↪" label="Redo" disabled={future.length === 0}
-            onClick={() => { const e = store.redo(); if (e) toPhaser({ type: 'SET_PROPERTIES', id: e.id, ...e.props }); }} />
+          <ToolBtn icon="↩" label="Undo" disabled={past.length === 0 || !!devUrl} onClick={undo} />
+          <ToolBtn icon="↪" label="Redo" disabled={future.length === 0 || !!devUrl} onClick={redo} />
         </div>
 
         <div className="flex-1" />
         {past.length > 0 && <span className="text-xs text-gray-700 hidden xl:block mr-2">{past.length} action{past.length !== 1 ? 's' : ''}</span>}
-        {saveStatus === 'unsaved' && <span className="text-[10px] text-yellow-600 hidden xl:block">unsaved</span>}
-        {saveStatus === 'saving'  && <span className="text-[10px] text-gray-500 hidden xl:block">saving…</span>}
-        {saveStatus === 'saved'   && <span className="text-[10px] text-gray-700 hidden xl:block">saved</span>}
+        {projectFolder && !devUrl && (
+          <span className={`text-[10px] hidden xl:block ${saveStatus === 'unsaved' ? 'text-yellow-600' : saveStatus === 'saving' ? 'text-gray-500' : 'text-gray-700'}`}>
+            {saveStatus === 'saving' ? 'saving…' : saveStatus}
+          </span>
+        )}
         {devStatus === 'running' && (
           <span className="text-[10px] font-mono text-green-600 border border-green-900 rounded px-1.5 py-0.5 hidden xl:flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block" />
             {devUrl}
           </span>
+        )}
+        {projectFolder && devScripts.length > 0 && (
+          <select
+            value={selectedScript}
+            onChange={e => changeScript(e.target.value)}
+            disabled={devStatus === 'running' || devStatus === 'starting'}
+            title="Which dev script (variant) to run"
+            className="max-w-40 px-2 py-1.5 rounded text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-600 focus:border-blue-500 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {devScripts.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
         )}
         <ToolBtn
           icon={devStatus === 'running' ? '⏹' : devStatus === 'starting' ? '⏳' : '▶'}
@@ -798,25 +626,19 @@ export default function App() {
             {liveEditMode ? '🎯 Edit' : '🎮 Play'}
           </button>
         )}
-        <ToolBtn icon="⌨" label="VS Code" onClick={() => {
-          if (projectFolder) (window as any).electronAPI?.openVSCode(projectFolder);
-        }} disabled={!projectFolder} />
-        <ToolBtn icon="💾" label="Save (Ctrl+S)" onClick={handleSave} disabled={!projectFolder} />
+        <ToolBtn icon="⌨" label="VS Code" onClick={() => projectFolder && api.openVSCode(projectFolder)} disabled={!projectFolder} />
+        <ToolBtn icon="💾" label="Save (Ctrl+S)" onClick={handleSave} disabled={!projectFolder || !!devUrl} />
       </header>
 
-      {/* ── Main layout ── */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* ── Hierarchy ── */}
         <div style={{ width: hierarchyW }}
           className={`flex-shrink-0 relative ${isDraggingAsset ? 'ring-1 ring-inset ring-blue-600/40' : ''}`}
           onDragOver={isDraggingAsset ? e => e.preventDefault() : undefined}
           onDrop={isDraggingAsset ? handleDropOnHierarchy : undefined}
         >
           {devUrl ? (
-            /* LIVE MODE — bridge objects */
             <aside className="flex flex-col border-r border-gray-700 bg-gray-800 h-full overflow-hidden">
-              {/* Bridge status bar */}
               <div className="px-3 py-2 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
                 <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex-1">Hierarchy</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 ${
@@ -829,16 +651,10 @@ export default function App() {
                   {bridgeStatus}
                 </span>
               </div>
-              {/* Scene selector */}
               {bridgeScenes.length > 0 && (
                 <div className="px-2 py-1.5 border-b border-gray-700 flex-shrink-0">
-                  <select value={activeBridgeScene ?? ''} onChange={e => {
-                    setActiveBridgeScene(e.target.value);
-                    setBridgeSelected(null);
-                    setBridgeSelectedId(null);
-                    setBridgeScreenBounds(null);
-                    requestBridgeObjects(e.target.value);
-                  }} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500">
+                  <select value={activeBridgeScene ?? ''} onChange={e => changeLiveScene(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500">
                     {bridgeScenes.map(s => (
                       <option key={s.key} value={s.key}>{s.key}{s.active ? ' ●' : ''}</option>
                     ))}
@@ -847,30 +663,22 @@ export default function App() {
                     className="mt-1 w-full text-[10px] text-gray-600 hover:text-gray-300 transition-colors">↺ Refresh</button>
                 </div>
               )}
-              {/* Objects list */}
               <div className="flex-1 overflow-y-auto py-1">
                 {bridgeStatus !== 'connected' ? (
                   <div className="p-4 text-center">
                     <p className="text-xs text-gray-500 mb-3 leading-relaxed">
                       {bridgeStatus === 'connecting' ? 'Connecting to game bridge…' : 'Bridge not detected in game.'}
                     </p>
-                    {(bridgeStatus === 'connecting' || bridgeStatus === 'disconnected') && (
-                      <button onClick={handleInstallBridge}
-                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded transition-colors">
-                        Install Bridge
-                      </button>
-                    )}
+                    <button onClick={installBridge}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded transition-colors">
+                      Install Bridge
+                    </button>
                   </div>
                 ) : bridgeObjects.length === 0 ? (
                   <p className="text-xs text-gray-600 text-center py-6">No objects in scene.</p>
                 ) : (
                   bridgeObjects.map(obj => (
-                    <div key={obj.id}
-                      onClick={() => {
-                        setBridgeSelectedId(obj.id);
-                        setBridgeSelected(obj);
-                        toGame({ forge: true, type: 'FORGE_SELECT', id: obj.id });
-                      }}
+                    <div key={obj.id} onClick={() => selectLiveObject(obj)}
                       className={`flex items-center gap-2 px-3 py-1.5 mx-1 rounded text-xs cursor-pointer transition-colors ${
                         bridgeSelectedId === obj.id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-700/60 hover:text-gray-200'}`}>
                       <span className="opacity-50 truncate max-w-16">{obj.type}</span>
@@ -882,21 +690,13 @@ export default function App() {
               </div>
             </aside>
           ) : (
-            /* DESIGN MODE — our scene objects */
             <HierarchyPanel
               items={hierarchy} selectedId={selectedId}
-              onSelect={handleSelectObject} onDelete={handleDeleteObject}
-              onDuplicate={handleDuplicateObject} onRename={handleRenameObject}
-              onAddPrimitive={shape => toPhaser({ type: 'ADD_PRIMITIVE', shape })}
-              onToggleVisible={id => {
-                const item = hierarchy.find(i => i.id === id);
-                if (!item) return;
-                const next = !item.visible;
-                setHierarchy(prev => prev.map(i => i.id === id ? { ...i, visible: next } : i));
-                toPhaser({ type: 'SET_PROPERTIES', id, visible: next });
-                if (selectedId === id) store.updateProperties({ visible: next });
-              }}
-              onToggleLocked={id => toggleLocked(id)}
+              onSelect={selectObject} onDelete={deleteObject}
+              onDuplicate={duplicateObject} onRename={renameObject}
+              onAddPrimitive={shape => send({ type: 'ADD_PRIMITIVE', shape })}
+              onToggleVisible={toggleVisible}
+              onToggleLocked={toggleLocked}
             />
           )}
           {isDraggingAsset && (
@@ -905,22 +705,14 @@ export default function App() {
             </div>
           )}
         </div>
-        {/* Hierarchy resize handle */}
-        <div onMouseDown={makeHResizer(setHierarchyW, 'left')}
-          className={`w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent `} />
+        <div onMouseDown={e => startSideResize(e, 'hierarchy')}
+          className="w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent" />
 
-        {/* ── Viewport ── */}
         <main className="flex-1 bg-[#0a0f1a] relative overflow-hidden">
-          <iframe ref={iframeRef} src={iframeSrc} onLoad={handleIframeLoad}
-            className="w-full h-full border-none" title="Phaser Viewport" />
+          <iframe ref={iframeRef} src={iframeSrc} className="w-full h-full border-none" title="Phaser Viewport" />
 
-          {/* Transparent drag-drop overlay — sits over iframe while dragging asset */}
           {isDraggingAsset && (
-            <div
-              className="absolute inset-0 z-10 cursor-copy"
-              onDragOver={e => e.preventDefault()}
-              onDrop={handleDropAsset}
-            >
+            <div className="absolute inset-0 z-10 cursor-copy" onDragOver={e => e.preventDefault()} onDrop={handleDropOnViewport}>
               <div className="absolute inset-0 border-2 border-dashed border-blue-500/40 pointer-events-none" />
             </div>
           )}
@@ -929,11 +721,11 @@ export default function App() {
             <div
               ref={overlayRef}
               className="absolute inset-0 z-10 cursor-crosshair"
-              onClick={handleLiveViewportClick}
+              onClick={handleLiveClick}
               onPointerDown={handleLivePointerDown}
               onPointerMove={handleLivePointerMove}
               onPointerUp={handleLivePointerUp}
-              onPointerCancel={handleLivePointerCancel}
+              onPointerCancel={() => { liveDragRef.current = null; }}
             >
               {bridgeScreenBounds && bridgeScreenBounds.width > 0 && bridgeScreenBounds.height > 0 && (
                 <div
@@ -945,16 +737,14 @@ export default function App() {
                     height: bridgeScreenBounds.height,
                   }}
                 >
-                  <div className="absolute -top-1 -left-1 w-2 h-2 bg-white border border-blue-500" />
-                  <div className="absolute -top-1 -right-1 w-2 h-2 bg-white border border-blue-500" />
-                  <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-white border border-blue-500" />
-                  <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-white border border-blue-500" />
+                  {['-top-1 -left-1', '-top-1 -right-1', '-bottom-1 -left-1', '-bottom-1 -right-1'].map(pos => (
+                    <div key={pos} className={`absolute ${pos} w-2 h-2 bg-white border border-blue-500`} />
+                  ))}
                 </div>
               )}
             </div>
           )}
 
-          {/* Badges */}
           <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
             {devUrl ? (
               <span className="bg-green-900/90 backdrop-blur text-green-300 text-xs px-2 py-1 rounded uppercase tracking-wider border border-green-700 flex items-center gap-1.5">
@@ -966,65 +756,61 @@ export default function App() {
             )}
             {!devUrl && snapEnabled && <span className="bg-blue-900/80 backdrop-blur text-blue-300 text-xs px-2 py-1 rounded border border-blue-700">SNAP 32px</span>}
           </div>
-          <div className="absolute bottom-3 left-3 text-gray-700 text-[10px] pointer-events-none">
-            Q·W·E·R = tools &nbsp;·&nbsp; Scroll = zoom &nbsp;·&nbsp; Middle mouse = pan &nbsp;·&nbsp; F = reset view &nbsp;·&nbsp; Del = delete
-          </div>
+          {!devUrl && (
+            <div className="absolute bottom-3 left-3 text-gray-700 text-[10px] pointer-events-none">
+              Q·W·E·R = tools &nbsp;·&nbsp; Scroll = zoom &nbsp;·&nbsp; Middle mouse = pan &nbsp;·&nbsp; F = reset view &nbsp;·&nbsp; Del = delete
+            </div>
+          )}
         </main>
 
-        {/* Inspector resize handle */}
-        <div onMouseDown={makeHResizer(setInspectorW, 'right')}
-          className={`w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent `} />
-        {/* ── Inspector ── */}
+        <div onMouseDown={e => startSideResize(e, 'inspector')}
+          className="w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent" />
         <aside style={{ width: inspectorW }} className="flex-shrink-0 flex flex-col border-l border-gray-700 bg-gray-800 overflow-y-auto">
           <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
             <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Inspector</span>
             {devUrl && <span className="text-[10px] text-green-600 font-medium">LIVE</span>}
           </div>
 
-          {/* LIVE MODE inspector — bridge selected object */}
-          {devUrl && bridgeSelected && (
-            <div className="p-3 space-y-4 text-sm">
-              <div className="bg-gray-900 rounded px-3 py-2">
-                <div className="text-[10px] text-gray-500 mb-0.5">Type / Name</div>
-                <div className="text-xs text-white font-mono truncate">{bridgeSelected.type} — {bridgeSelected.name || bridgeSelected.id}</div>
-                {bridgeSelected.textureKey && <div className="text-[10px] text-gray-500 mt-0.5">Texture: {bridgeSelected.textureKey}</div>}
+          {devUrl ? (
+            bridgeSelected ? (
+              <div className="p-3 space-y-4 text-sm">
+                <div className="bg-gray-900 rounded px-3 py-2">
+                  <div className="text-[10px] text-gray-500 mb-0.5">Type / Name</div>
+                  <div className="text-xs text-white font-mono truncate">{bridgeSelected.type} — {bridgeSelected.name || bridgeSelected.id}</div>
+                  {bridgeSelected.textureKey && <div className="text-[10px] text-gray-500 mt-0.5">Texture: {bridgeSelected.textureKey}</div>}
+                </div>
+                <section>
+                  <div className="section-label mb-2">Position</div>
+                  <InspectorField label="X" value={Math.round(bridgeSelected.x)} step={1} onChange={v => setLiveProp('x', v)} />
+                  <InspectorField label="Y" value={Math.round(bridgeSelected.y)} step={1} onChange={v => setLiveProp('y', v)} />
+                  {bridgeSelected.displayWidth !== undefined && <div className="text-[10px] text-gray-600 text-right">display: {bridgeSelected.displayWidth}×{bridgeSelected.displayHeight}px</div>}
+                </section>
+                <section>
+                  <div className="section-label mb-2">Rotation</div>
+                  <InspectorField label="Angle (rad)" value={round2(bridgeSelected.rotation)} onChange={v => setLiveProp('rotation', v)} />
+                  <div className="text-[10px] text-gray-600 text-right -mt-1">{Math.round((bridgeSelected.rotation * 180) / Math.PI)}°</div>
+                </section>
+                <section>
+                  <div className="section-label mb-2">Scale</div>
+                  <InspectorField label="Scale X" value={round2(bridgeSelected.scaleX)} min={0} onChange={v => setLiveProp('scaleX', v)} />
+                  <InspectorField label="Scale Y" value={round2(bridgeSelected.scaleY)} min={0} onChange={v => setLiveProp('scaleY', v)} />
+                </section>
+                <section>
+                  <div className="section-label mb-2">Appearance</div>
+                  <InspectorField label="Alpha" value={round2(bridgeSelected.alpha)} min={0} max={1} onChange={v => setLiveProp('alpha', v)} />
+                  <InspectorField label="Depth" value={bridgeSelected.depth} step={1} onChange={v => setLiveProp('depth', v)} />
+                  <InspectorField label="Visible" value={bridgeSelected.visible} type="checkbox" onChange={v => setLiveProp('visible', v)} />
+                </section>
               </div>
-              <section>
-                <div className="section-label mb-2">Position</div>
-                <InspectorField label="X" value={Math.round(bridgeSelected.x)} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, x: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'x', value: v }); }} />
-                <InspectorField label="Y" value={Math.round(bridgeSelected.y)} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, y: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'y', value: v }); }} />
-                {bridgeSelected.displayWidth !== undefined && <div className="text-[10px] text-gray-600 text-right">display: {bridgeSelected.displayWidth}×{bridgeSelected.displayHeight}px</div>}
-              </section>
-              <section>
-                <div className="section-label mb-2">Rotation</div>
-                <InspectorField label="Angle (rad)" value={round2(bridgeSelected.rotation)} step={0.01} onChange={v => { setBridgeSelected(p => p ? { ...p, rotation: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'rotation', value: v }); }} />
-                <div className="text-[10px] text-gray-600 text-right -mt-1">{Math.round((bridgeSelected.rotation * 180) / Math.PI)}°</div>
-              </section>
-              <section>
-                <div className="section-label mb-2">Scale</div>
-                <InspectorField label="Scale X" value={round2(bridgeSelected.scaleX)} step={0.01} min={0} onChange={v => { setBridgeSelected(p => p ? { ...p, scaleX: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'scaleX', value: v }); }} />
-                <InspectorField label="Scale Y" value={round2(bridgeSelected.scaleY)} step={0.01} min={0} onChange={v => { setBridgeSelected(p => p ? { ...p, scaleY: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'scaleY', value: v }); }} />
-              </section>
-              <section>
-                <div className="section-label mb-2">Appearance</div>
-                <InspectorField label="Alpha" value={round2(bridgeSelected.alpha)} step={0.01} min={0} max={1} onChange={v => { setBridgeSelected(p => p ? { ...p, alpha: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'alpha', value: v }); }} />
-                <InspectorField label="Depth" value={bridgeSelected.depth} step={1} onChange={v => { setBridgeSelected(p => p ? { ...p, depth: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'depth', value: v }); }} />
-                <InspectorField label="Visible" value={bridgeSelected.visible} type="checkbox" onChange={v => { setBridgeSelected(p => p ? { ...p, visible: v } : null); toGame({ forge: true, type: 'FORGE_SET_PROP', id: bridgeSelected.id, prop: 'visible', value: v }); }} />
-              </section>
-            </div>
-          )}
-
-          {devUrl && !bridgeSelected && (
-            <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
-              <div className="text-4xl mb-3 opacity-20">🎮</div>
-              <p className="text-xs text-gray-500 leading-relaxed">
-                {bridgeStatus === 'connected' ? 'Click an object in the hierarchy.' : 'Waiting for bridge connection…'}
-              </p>
-            </div>
-          )}
-
-          {/* DESIGN MODE inspector */}
-          {!devUrl && selectedId ? (
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+                <div className="text-4xl mb-3 opacity-20">🎮</div>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  {bridgeStatus === 'connected' ? 'Click an object in the hierarchy.' : 'Waiting for bridge connection…'}
+                </p>
+              </div>
+            )
+          ) : selectedId ? (
             <div className="p-3 space-y-4 text-sm">
               <div className="bg-gray-900 rounded px-3 py-2">
                 <div className="text-[10px] text-gray-500 mb-0.5">ID</div>
@@ -1032,56 +818,39 @@ export default function App() {
               </div>
               <section>
                 <div className="section-label mb-2">Position</div>
-                <InspectorField label="X" value={x} step={1} onChange={v => updateField('x', v)} />
-                <InspectorField label="Y" value={y} step={1} onChange={v => updateField('y', v)} />
+                <InspectorField label="X" value={x} step={1} onChange={v => updateField({ x: v })} onCommit={commit} />
+                <InspectorField label="Y" value={y} step={1} onChange={v => updateField({ y: v })} onCommit={commit} />
               </section>
               <section>
                 <div className="section-label mb-2">Rotation</div>
-                <InspectorField label="Angle (rad)" value={rotation} step={0.01} onChange={v => updateField('rotation', v)} />
+                <InspectorField label="Angle (rad)" value={rotation} onChange={v => updateField({ rotation: v })} onCommit={commit} />
                 <div className="text-[10px] text-gray-600 text-right -mt-1">{Math.round((rotation * 180) / Math.PI)}°</div>
               </section>
               <section>
                 <div className="section-label mb-2">Scale</div>
-                <InspectorField label="Scale X" value={scaleX} step={0.01} min={0} onChange={v => updateField('scaleX', v)} />
-                <InspectorField label="Scale Y" value={scaleY} step={0.01} min={0} onChange={v => updateField('scaleY', v)} />
+                <InspectorField label="Scale X" value={scaleX} min={0} onChange={v => updateField({ scaleX: v })} onCommit={commit} />
+                <InspectorField label="Scale Y" value={scaleY} min={0} onChange={v => updateField({ scaleY: v })} onCommit={commit} />
               </section>
               <section>
                 <div className="section-label mb-2">Appearance</div>
-                <InspectorField label="Alpha" value={alpha} step={0.01} min={0} max={1} onChange={v => updateField('alpha', Math.min(1, Math.max(0, v)))} />
-                <InspectorField label="Tint" value={tint} type="color" onChange={v => updateField('tint', v)} />
-                <InspectorField label="Visible" value={visible} type="checkbox" onChange={v => updateField('visible', v)} />
+                <InspectorField label="Alpha" value={alpha} min={0} max={1} onChange={v => updateField({ alpha: clamp(v, 0, 1) })} onCommit={commit} />
+                <InspectorField label="Tint" value={tint} type="color" onChange={v => updateField({ tint: v })} onCommit={commit} />
+                <InspectorField label="Visible" value={visible} type="checkbox" onChange={v => updateField({ visible: v })} onCommit={commit} />
               </section>
               <section>
                 <div className="section-label mb-2">Depth (Z-order)</div>
-                <InspectorField label="Depth" value={depth} step={1} onChange={v => updateField('depth', Math.round(v))} />
+                <InspectorField label="Depth" value={depth} step={1} onChange={v => updateField({ depth: Math.round(v) })} onCommit={commit} />
                 <div className="text-[10px] text-gray-600 -mt-1">Higher = rendered on top</div>
               </section>
               <section>
                 <div className="section-label mb-2">Origin (Pivot)</div>
-                <InspectorField label="Origin X" value={originX} step={0.01} min={0} max={1} onChange={v => updateField('originX', Math.min(1, Math.max(0, v)))} />
-                <InspectorField label="Origin Y" value={originY} step={0.01} min={0} max={1} onChange={v => updateField('originY', Math.min(1, Math.max(0, v)))} />
-                {/* Quick presets */}
+                <InspectorField label="Origin X" value={originX} min={0} max={1} onChange={v => updateField({ originX: clamp(v, 0, 1) })} onCommit={commit} />
+                <InspectorField label="Origin Y" value={originY} min={0} max={1} onChange={v => updateField({ originY: clamp(v, 0, 1) })} onCommit={commit} />
                 <div className="flex flex-wrap gap-1 mt-1.5">
-                  {([
-                    { l: 'TL', x: 0, y: 0 },
-                    { l: 'TC', x: 0.5, y: 0 },
-                    { l: 'TR', x: 1, y: 0 },
-                    { l: 'CL', x: 0, y: 0.5 },
-                    { l: 'C', x: 0.5, y: 0.5 },
-                    { l: 'CR', x: 1, y: 0.5 },
-                    { l: 'BL', x: 0, y: 1 },
-                    { l: 'BC', x: 0.5, y: 1 },
-                    { l: 'BR', x: 1, y: 1 },
-                  ] as const).map(p => (
-                    <button key={p.l}
-                      onClick={() => { updateField('originX', p.x); updateField('originY', p.y); }}
-                      className={`px-1.5 py-0.5 rounded text-[9px] border transition-colors ${
-                        originX === p.x && originY === p.y
-                          ? 'border-blue-500 bg-blue-900/40 text-blue-300'
-                          : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'
-                      }`}>
-                      {p.l}
-                    </button>
+                  {ORIGIN_PRESETS.map(p => (
+                    <PresetButton key={p.l} label={p.l} className="px-1.5 py-0.5 text-[9px]"
+                      active={originX === p.x && originY === p.y}
+                      onClick={() => updateField({ originX: p.x, originY: p.y }, true)} />
                   ))}
                 </div>
                 <div className="text-[10px] text-gray-600 mt-1">Affects where x/y anchors on the sprite</div>
@@ -1089,34 +858,21 @@ export default function App() {
               <section>
                 <div className="section-label mb-2">Flip</div>
                 <div className="flex gap-2">
-                  {(['X', 'Y'] as const).map(axis => {
-                    const val = axis === 'X' ? flipX : flipY;
-                    const key = axis === 'X' ? 'flipX' : 'flipY';
-                    return (
-                      <button key={axis} onClick={() => updateField(key, !val)}
-                        className={`flex-1 py-1.5 rounded text-xs font-medium border transition-colors ${
-                          val ? 'border-blue-500 bg-blue-900/40 text-blue-300'
-                              : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'}`}>
-                        Flip {axis}
-                      </button>
-                    );
-                  })}
+                  <PresetButton label="Flip X" active={flipX} className="flex-1 py-1.5 text-xs font-medium"
+                    onClick={() => updateField({ flipX: !flipX }, true)} />
+                  <PresetButton label="Flip Y" active={flipY} className="flex-1 py-1.5 text-xs font-medium"
+                    onClick={() => updateField({ flipY: !flipY }, true)} />
                 </div>
               </section>
               <section>
                 <div className="section-label mb-2">Scroll Factor</div>
-                <InspectorField label="Factor X" value={scrollFactorX} step={0.1} min={0} max={1} onChange={v => updateField('scrollFactorX', v)} />
-                <InspectorField label="Factor Y" value={scrollFactorY} step={0.1} min={0} max={1} onChange={v => updateField('scrollFactorY', v)} />
+                <InspectorField label="Factor X" value={scrollFactorX} step={0.1} min={0} max={1} onChange={v => updateField({ scrollFactorX: v })} onCommit={commit} />
+                <InspectorField label="Factor Y" value={scrollFactorY} step={0.1} min={0} max={1} onChange={v => updateField({ scrollFactorY: v })} onCommit={commit} />
                 <div className="flex gap-2 mt-1.5">
-                  {[{ l: 'UI (0)', v: 0 }, { l: 'World (1)', v: 1 }].map(p => (
-                    <button key={p.l}
-                      onClick={() => { updateField('scrollFactorX', p.v); updateField('scrollFactorY', p.v); }}
-                      className={`flex-1 py-1 rounded text-[10px] border transition-colors ${
-                        scrollFactorX === p.v && scrollFactorY === p.v
-                          ? 'border-blue-500 bg-blue-900/40 text-blue-300'
-                          : 'border-gray-600 text-gray-500 hover:border-gray-400 hover:text-gray-300'}`}>
-                      {p.l}
-                    </button>
+                  {SCROLL_PRESETS.map(p => (
+                    <PresetButton key={p.l} label={p.l} className="flex-1 py-1 text-[10px]"
+                      active={scrollFactorX === p.v && scrollFactorY === p.v}
+                      onClick={() => updateField({ scrollFactorX: p.v, scrollFactorY: p.v }, true)} />
                   ))}
                 </div>
                 <div className="text-[10px] text-gray-600 mt-1">0 = fixed to camera (UI), 1 = moves with world</div>
@@ -1125,13 +881,13 @@ export default function App() {
                 <section>
                   <div className="section-label mb-2">Display Size</div>
                   <InspectorField label="Width (px)" value={round2(scaleX * texW)} step={1} min={1}
-                    onChange={v => updateField('scaleX', round2(v / texW))} />
+                    onChange={v => updateField({ scaleX: round2(v / texW) })} onCommit={commit} />
                   <InspectorField label="Height (px)" value={round2(scaleY * texH)} step={1} min={1}
-                    onChange={v => updateField('scaleY', round2(v / texH))} />
+                    onChange={v => updateField({ scaleY: round2(v / texH) })} onCommit={commit} />
                   <div className="text-[10px] text-gray-600 mt-1">Native: {texW}×{texH}px — edits scale</div>
                 </section>
               )}
-              <button onClick={() => handleDeleteObject(selectedId)}
+              <button onClick={() => deleteObject(selectedId)}
                 className="w-full py-2 rounded text-xs text-red-400 border border-red-900 hover:bg-red-900/30 transition-colors">
                 🗑 Delete Object
               </button>
@@ -1145,28 +901,22 @@ export default function App() {
         </aside>
       </div>
 
-      {/* ── Asset Browser (resizable) ── */}
       <footer className="border-t border-gray-700 bg-gray-800 flex-shrink-0"
         style={{ height: panelOpen ? panelH + 36 : 36 }}>
 
         {panelOpen && (
-          <div
-            onMouseDown={startPanelResize}
-            className="h-2 w-full cursor-ns-resize flex items-center justify-center group flex-shrink-0"
-            style={{ background: 'transparent' }}
-          >
+          <div onMouseDown={startPanelResize}
+            className="h-2 w-full cursor-ns-resize flex items-center justify-center group flex-shrink-0">
             <div className="w-16 h-0.5 rounded-full bg-gray-600 group-hover:bg-blue-500 transition-colors" />
           </div>
         )}
 
-        {/* Panel header with tabs */}
         <div className="px-3 flex items-center gap-1 h-9 border-b border-gray-700">
           <button onClick={() => setPanelOpen(o => !o)} className="text-gray-500 hover:text-white transition-colors mr-1">
             {panelOpen ? '▾' : '▸'}
           </button>
-          {/* Tabs */}
           {(['assets', 'console'] as const).map(tab => (
-            <button key={tab} onClick={() => { setActiveTab(tab); if (!panelOpen) setPanelOpen(true); }}
+            <button key={tab} onClick={() => { setActiveTab(tab); setPanelOpen(true); }}
               className={`px-3 py-1 text-xs rounded-t font-medium transition-colors ${
                 activeTab === tab && panelOpen
                   ? 'bg-gray-900 text-white'
@@ -1176,7 +926,7 @@ export default function App() {
                 <span className="flex items-center gap-1">
                   Console
                   {devStatus === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-green-500" />}
-                  {devStatus === 'error'   && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+                  {devStatus === 'error' && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
                 </span>
               )}
             </button>
@@ -1194,7 +944,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Panel content */}
         {panelOpen && activeTab === 'assets' && (
           <div style={{ height: panelH - 4 }} className="flex overflow-hidden">
             <AssetBrowser

@@ -7,571 +7,453 @@ const CANVAS_H = parseInt(params.get('h') ?? '720');
 const ARROW_LEN = 65;
 const ROT_RADIUS = 60;
 const HANDLE_SZ = 14;
+const GRID = 32;
+const PRIMITIVE_SZ = 64;
+
+type Shape = 'rect' | 'circle' | 'triangle';
+type Sprite = Phaser.GameObjects.Sprite;
+interface SpriteData { kind: 'sprite' | 'primitive'; name: string; shape?: Shape; assetName?: string; assetFullPath?: string }
+
+const SHAPE_NAMES: Record<Shape, string> = { rect: 'Rectangle', circle: 'Circle', triangle: 'Triangle' };
+const SHAPE_TYPES: Record<Shape, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
+
+const post = (msg: object) => window.parent.postMessage(msg, '*');
+const hexTint = (spr: Sprite) => '#' + (spr.tintTopLeft || 0xffffff).toString(16).padStart(6, '0');
 
 class EditorScene extends Phaser.Scene {
-  private sprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
-  private spriteData: Map<string, { kind: string; name: string; shape?: string; assetName?: string; assetFullPath?: string }> = new Map();
+  private sprites = new Map<string, Sprite>();
+  private spriteData = new Map<string, SpriteData>();
 
-  private selectedSprite: Phaser.GameObjects.Sprite | null = null;
+  private selectedSprite: Sprite | null = null;
   private selectedId: string | null = null;
 
-  private gridGfx!: Phaser.GameObjects.Graphics;
   private selGfx!: Phaser.GameObjects.Graphics;
   private gizmoGfx!: Phaser.GameObjects.Graphics;
+  private bounds = new Phaser.Geom.Rectangle();
 
   private hX!: Phaser.GameObjects.Rectangle;
   private hY!: Phaser.GameObjects.Rectangle;
   private hRot!: Phaser.GameObjects.Rectangle;
   private hSX!: Phaser.GameObjects.Rectangle;
   private hSY!: Phaser.GameObjects.Rectangle;
+  private handleStart = { hx: 0, hy: 0, x: 0, y: 0, scaleX: 1, scaleY: 1 };
 
   private toolMode = 'select';
   private snapOn = false;
-  private SNAP = 32;
-  private lockedIds: Set<string> = new Set();
+  private lockedIds = new Set<string>();
 
-  // Camera pan state
   private isPanning = false;
-  private panStartX = 0;
-  private panStartY = 0;
-  private panScrollX = 0;
-  private panScrollY = 0;
+  private panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
   constructor() { super('EditorScene'); }
 
-  preload() {}
-
   create() {
     this.cameras.main.setBackgroundColor('#0f1117');
+    this.drawCanvasFrame();
 
-    // ── Canvas boundary ──────────────────────────────────────────────────
-    // Dark outer area (outside canvas bounds)
-    const outerBg = this.add.graphics().setDepth(-2);
-    outerBg.fillStyle(0x060810, 1);
-    outerBg.fillRect(-4000, -4000, 8000 + CANVAS_W, 8000 + CANVAS_H);
-    // "Erase" the canvas area back to scene bg
-    const canvasBg = this.add.graphics().setDepth(-1);
-    canvasBg.fillStyle(0x111827, 1);
-    canvasBg.fillRect(0, 0, CANVAS_W, CANVAS_H);
-    // Canvas border
-    const border = this.add.graphics().setDepth(0);
-    border.lineStyle(1, 0x334155, 1);
-    border.strokeRect(0, 0, CANVAS_W, CANVAS_H);
-    // Corner ticks
-    border.lineStyle(2, 0x475569, 1);
-    const tk = 16;
-    [[0, 0], [CANVAS_W, 0], [0, CANVAS_H], [CANVAS_W, CANVAS_H]].forEach(([cx, cy]) => {
-      const sx = cx === 0 ? 1 : -1;
-      const sy = cy === 0 ? 1 : -1;
-      border.lineBetween(cx, cy, cx + sx * tk, cy);
-      border.lineBetween(cx, cy, cx, cy + sy * tk);
-    });
-
-    // ── Grid ─────────────────────────────────────────────────────────────
-    this.gridGfx = this.add.graphics().setDepth(0);
-    this.drawGrid();
-
-    // ── Selection + gizmo layers ─────────────────────────────────────────
     this.selGfx = this.add.graphics().setDepth(997);
     this.gizmoGfx = this.add.graphics().setDepth(998);
 
-    // ── Gizmo handles ────────────────────────────────────────────────────
-    const makeHandle = () => {
-      const r = this.add.rectangle(0, 0, HANDLE_SZ, HANDLE_SZ, 0xff0000, 0);
-      r.setDepth(999).setVisible(false).setInteractive({ draggable: true });
-      return r;
-    };
+    const makeHandle = () =>
+      this.add.rectangle(0, 0, HANDLE_SZ, HANDLE_SZ, 0xff0000, 0)
+        .setDepth(999).setVisible(false).setInteractive({ draggable: true });
     this.hX = makeHandle();
     this.hY = makeHandle();
     this.hRot = makeHandle();
     this.hSX = makeHandle();
     this.hSY = makeHandle();
+    const handles: Phaser.GameObjects.GameObject[] = [this.hX, this.hY, this.hRot, this.hSX, this.hSY];
 
-    // ── Handle drags ─────────────────────────────────────────────────────
-    this.hX.on('drag', (_p: any, dx: number) => {
-      if (!this.selectedSprite) return;
-      this.selectedSprite.x = this.snap(dx);
-      this.notify();
+    // dragX/dragY are the handle's start position plus pointer delta, so work from a snapshot taken at dragstart.
+    const onHandleDrag = (handle: Phaser.GameObjects.Rectangle, apply: (s: Sprite, dragX: number, dragY: number) => void) => {
+      handle.on('dragstart', () => {
+        const s = this.selectedSprite;
+        if (!s) return;
+        this.handleStart = { hx: handle.x, hy: handle.y, x: s.x, y: s.y, scaleX: s.scaleX, scaleY: s.scaleY };
+      });
+      handle.on('drag', (_p: Phaser.Input.Pointer, dragX: number, dragY: number) => {
+        if (!this.selectedSprite) return;
+        apply(this.selectedSprite, dragX, dragY);
+        this.notifyTransform();
+      });
+      handle.on('dragend', () => post({ type: 'PUSH_HISTORY' }));
+    };
+    onHandleDrag(this.hX, (s, dragX) => {
+      const st = this.handleStart;
+      s.x = this.snap(st.x + dragX - st.hx);
     });
-    this.hY.on('drag', (_p: any, _dx: number, dy: number) => {
-      if (!this.selectedSprite) return;
-      this.selectedSprite.y = this.snap(dy);
-      this.notify();
+    onHandleDrag(this.hY, (s, _dragX, dragY) => {
+      const st = this.handleStart;
+      s.y = this.snap(st.y + dragY - st.hy);
     });
-    this.hRot.on('drag', (_p: any, dx: number, dy: number) => {
-      if (!this.selectedSprite) return;
-      this.selectedSprite.rotation = Math.atan2(
-        dy - this.selectedSprite.y,
-        dx - this.selectedSprite.x
-      ) + Math.PI / 2;
-      this.notify();
+    onHandleDrag(this.hRot, (s, dragX, dragY) => {
+      s.rotation = Math.atan2(dragY - s.y, dragX - s.x) + Math.PI / 2;
     });
-    this.hSX.on('drag', (_p: any, dx: number) => {
-      if (!this.selectedSprite) return;
-      const dist = dx - this.selectedSprite.x;
-      const base = this.selectedSprite.width / 2 + ARROW_LEN;
-      this.selectedSprite.scaleX = Math.max(0.05, dist / base);
-      this.notify();
+    onHandleDrag(this.hSX, (s, dragX) => {
+      const st = this.handleStart;
+      s.scaleX = Math.max(0.05, st.scaleX * (dragX - st.x) / (st.hx - st.x));
     });
-    this.hSY.on('drag', (_p: any, _dx: number, dy: number) => {
-      if (!this.selectedSprite) return;
-      const dist = this.selectedSprite.y - dy;
-      const base = this.selectedSprite.height / 2 + ARROW_LEN;
-      this.selectedSprite.scaleY = Math.max(0.05, dist / base);
-      this.notify();
+    onHandleDrag(this.hSY, (s, _dragX, dragY) => {
+      const st = this.handleStart;
+      s.scaleY = Math.max(0.05, st.scaleY * (st.y - dragY) / (st.y - st.hy));
     });
 
-    const handles = [this.hX, this.hY, this.hRot, this.hSX, this.hSY];
-    handles.forEach(h => h.on('dragend', () => {
-      window.parent.postMessage({ type: 'PUSH_HISTORY' }, '*');
-    }));
-
-    // ── Sprite drag ──────────────────────────────────────────────────────
-    this.input.on('drag', (_p: any, go: Phaser.GameObjects.GameObject, dx: number, dy: number) => {
-      if (handles.includes(go as any)) return;
+    this.input.on('drag', (_p: Phaser.Input.Pointer, go: Phaser.GameObjects.GameObject, dragX: number, dragY: number) => {
+      if (handles.includes(go) || this.isPanning) return;
       if (this.toolMode !== 'select' && this.toolMode !== 'move') return;
-      if (this.isPanning) return;
-      const s = go as Phaser.GameObjects.Sprite;
+      const s = go as Sprite;
       const id = this.idOf(s);
       if (!id || this.lockedIds.has(id)) return;
-      s.x = this.snap(dx);
-      s.y = this.snap(dy);
-      window.parent.postMessage({ type: 'OBJECT_TRANSFORMED', id, x: s.x, y: s.y }, '*');
+      s.x = this.snap(dragX);
+      s.y = this.snap(dragY);
+      post({ type: 'OBJECT_TRANSFORMED', id, x: s.x, y: s.y });
+    });
+    this.input.on('dragend', (_p: Phaser.Input.Pointer, go: Phaser.GameObjects.GameObject) => {
+      if (!handles.includes(go)) post({ type: 'PUSH_HISTORY' });
     });
 
-    this.input.on('dragend', (_p: any, go: Phaser.GameObjects.GameObject) => {
-      if (!handles.includes(go as any)) {
-        window.parent.postMessage({ type: 'PUSH_HISTORY' }, '*');
-      }
-    });
-
-    // ── Selection via click ──────────────────────────────────────────────
     this.input.on('pointerdown', (p: Phaser.Input.Pointer, gos: Phaser.GameObjects.GameObject[]) => {
-      // Middle mouse — start pan
       if (p.middleButtonDown()) {
+        const cam = this.cameras.main;
         this.isPanning = true;
-        this.panStartX = p.x;
-        this.panStartY = p.y;
-        this.panScrollX = this.cameras.main.scrollX;
-        this.panScrollY = this.cameras.main.scrollY;
+        this.panStart = { x: p.x, y: p.y, scrollX: cam.scrollX, scrollY: cam.scrollY };
         return;
       }
-      const targets = gos.filter(g => !handles.includes(g as any));
-      if (targets.length > 0) {
-        const spr = targets[0] as Phaser.GameObjects.Sprite;
-        const id = this.idOf(spr);
-        if (id && !this.lockedIds.has(id)) this.selectSprite(id, spr);
+      const target = gos.find(g => !handles.includes(g)) as Sprite | undefined;
+      if (target) {
+        const id = this.idOf(target);
+        if (id && !this.lockedIds.has(id)) this.selectSprite(id, target);
       } else if (gos.length === 0) {
         this.deselect();
       }
     });
-
-    // ── Camera pan (middle mouse move) ───────────────────────────────────
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       if (!this.isPanning) return;
       const cam = this.cameras.main;
-      cam.scrollX = this.panScrollX - (p.x - this.panStartX) / cam.zoom;
-      cam.scrollY = this.panScrollY - (p.y - this.panStartY) / cam.zoom;
+      cam.scrollX = this.panStart.scrollX - (p.x - this.panStart.x) / cam.zoom;
+      cam.scrollY = this.panStart.scrollY - (p.y - this.panStart.y) / cam.zoom;
     });
-
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (p.middleButtonReleased()) this.isPanning = false;
     });
 
-    // ── Camera zoom (scroll wheel) ───────────────────────────────────────
-    this.input.on('wheel', (_ptr: any, _gos: any, _dx: number, dy: number) => {
+    // Zoom toward the cursor.
+    this.input.on('wheel', (p: Phaser.Input.Pointer, _gos: unknown, _dx: number, dy: number) => {
       const cam = this.cameras.main;
-      const newZoom = Phaser.Math.Clamp(cam.zoom * (1 - dy * 0.001), 0.15, 8);
-      // Zoom toward mouse position
-      const worldBefore = cam.getWorldPoint(_ptr?.x ?? CANVAS_W / 2, _ptr?.y ?? CANVAS_H / 2);
-      cam.setZoom(newZoom);
-      const worldAfter = cam.getWorldPoint(_ptr?.x ?? CANVAS_W / 2, _ptr?.y ?? CANVAS_H / 2);
-      cam.scrollX += worldBefore.x - worldAfter.x;
-      cam.scrollY += worldBefore.y - worldAfter.y;
+      const before = cam.getWorldPoint(p.x, p.y);
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (1 - dy * 0.001), 0.15, 8));
+      const after = cam.getWorldPoint(p.x, p.y);
+      cam.scrollX += before.x - after.x;
+      cam.scrollY += before.y - after.y;
     });
 
-    // ── postMessage from React ───────────────────────────────────────────
-    window.addEventListener('message', (ev) => {
-      const m = ev.data;
-      if (!m?.type) return;
-
-      if (m.type === 'SET_TOOL_MODE') this.toolMode = m.mode;
-      if (m.type === 'SET_SNAP') this.snapOn = m.enabled;
-      if (m.type === 'SET_LOCKED_IDS') this.lockedIds = new Set(m.ids as string[]);
-
-      if (m.type === 'RESET_SCENE') {
-        this.deselect();
-        for (const [, spr] of this.sprites) spr.destroy();
-        this.sprites.clear();
-        this.spriteData.clear();
-        window.parent.postMessage({ type: 'SCENE_READY', hierarchy: [] }, '*');
-      }
-
-      if (m.type === 'RESET_CAMERA') {
-        this.cameras.main.setScroll(0, 0);
-        this.cameras.main.setZoom(1);
-      }
-
-      if (m.type === 'SET_PROPERTIES') {
-        const s = this.sprites.get(m.id);
-        if (!s) return;
-        if (m.x !== undefined) s.x = m.x;
-        if (m.y !== undefined) s.y = m.y;
-        if (m.rotation !== undefined) s.rotation = m.rotation;
-        if (m.scaleX !== undefined) s.scaleX = m.scaleX;
-        if (m.scaleY !== undefined) s.scaleY = m.scaleY;
-        if (m.alpha !== undefined) s.alpha = m.alpha;
-        if (m.visible !== undefined) s.visible = m.visible;
-        if (m.depth !== undefined) s.setDepth(m.depth);
-        if (m.tint !== undefined) s.setTint(parseInt(m.tint.replace('#', ''), 16));
-        if (m.originX !== undefined || m.originY !== undefined)
-          s.setOrigin(m.originX ?? s.originX, m.originY ?? s.originY);
-        if (m.flipX !== undefined || m.flipY !== undefined)
-          s.setFlip(m.flipX ?? s.flipX, m.flipY ?? s.flipY);
-        if (m.scrollFactorX !== undefined || m.scrollFactorY !== undefined)
-          s.setScrollFactor(m.scrollFactorX ?? s.scrollFactorX, m.scrollFactorY ?? s.scrollFactorY);
-      }
-
-      if (m.type === 'SELECT_OBJECT') {
-        const s = this.sprites.get(m.id);
-        if (s) this.selectSprite(m.id, s);
-      }
-      if (m.type === 'DESELECT_ALL') this.deselect();
-
-      if (m.type === 'DELETE_OBJECT') {
-        const s = this.sprites.get(m.id);
-        if (s) {
-          if (this.selectedSprite === s) this.deselect();
-          s.destroy();
-          this.sprites.delete(m.id);
-          this.spriteData.delete(m.id);
-        }
-      }
-
-      if (m.type === 'DUPLICATE_OBJECT') {
-        const src = this.sprites.get(m.id);
-        if (src) {
-          const copy = this.add.sprite(src.x + 20, src.y + 20, src.texture.key);
-          copy.setScale(src.scaleX, src.scaleY).setRotation(src.rotation)
-              .setAlpha(src.alpha).setVisible(src.visible)
-              .setDepth(src.depth).setTint(src.tintTopLeft)
-              .setOrigin(src.originX, src.originY)
-              .setFlip(src.flipX, src.flipY)
-              .setScrollFactor(src.scrollFactorX, src.scrollFactorY);
-          copy.setInteractive({ draggable: true });
-          this.sprites.set(m.newId, copy);
-          const baseName = m.id.replace(/_copy_\d+$/, '');
-          window.parent.postMessage({ type: 'OBJECT_ADDED', id: m.newId, name: `${baseName} Copy`, objType: 'Sprite' }, '*');
-        }
-      }
-
-      if (m.type === 'RENAME_OBJECT') {
-        const d = this.spriteData.get(m.id);
-        if (d) d.name = m.name;
-        window.parent.postMessage({ type: 'OBJECT_RENAMED', id: m.id, name: m.name }, '*');
-      }
-
-      if (m.type === 'GET_SCENE_STATE') {
-        const objects: object[] = [];
-        for (const [id, spr] of this.sprites) {
-          const d = this.spriteData.get(id) ?? { kind: 'sprite', name: id };
-          objects.push({
-            id, name: d.name, kind: d.kind,
-            shape: d.shape, assetName: d.assetName, assetFullPath: d.assetFullPath,
-            x: spr.x, y: spr.y, rotation: spr.rotation,
-            scaleX: spr.scaleX, scaleY: spr.scaleY,
-            alpha: spr.alpha, visible: spr.visible, depth: spr.depth,
-            originX: spr.originX, originY: spr.originY,
-            flipX: spr.flipX, flipY: spr.flipY,
-            scrollFactorX: spr.scrollFactorX, scrollFactorY: spr.scrollFactorY,
-            tint: '#' + (spr.tintTopLeft || 0xffffff).toString(16).padStart(6, '0'),
-          });
-        }
-        window.parent.postMessage({ type: 'SCENE_STATE', objects }, '*');
-      }
-
-      if (m.type === 'LOAD_SCENE') {
-        this.deselect();
-        for (const [, spr] of this.sprites) spr.destroy();
-        this.sprites.clear();
-        this.spriteData.clear();
-        window.parent.postMessage({ type: 'SCENE_READY', hierarchy: [] }, '*');
-
-        for (const obj of m.objects as any[]) {
-          if (obj.kind === 'primitive') {
-            const key = `prim_${obj.shape}`;
-            if (!this.textures.exists(key)) {
-              const sz = 64;
-              const g = this.add.graphics();
-              g.fillStyle(0xffffff, 1);
-              g.lineStyle(2, 0xffffff, 0.3);
-              if (obj.shape === 'rect')     { g.fillRect(2, 2, sz-4, sz-4); g.strokeRect(2, 2, sz-4, sz-4); }
-              if (obj.shape === 'circle')   { g.fillCircle(sz/2, sz/2, sz/2-2); g.strokeCircle(sz/2, sz/2, sz/2-2); }
-              if (obj.shape === 'triangle') { g.fillTriangle(sz/2, 2, sz-2, sz-2, 2, sz-2); g.strokeTriangle(sz/2, 2, sz-2, sz-2, 2, sz-2); }
-              g.generateTexture(key, sz, sz);
-              g.destroy();
-            }
-            const spr = this.add.sprite(obj.x, obj.y, key);
-            this.applyProps(spr, obj);
-            this.sprites.set(obj.id, spr);
-            this.spriteData.set(obj.id, { kind: 'primitive', shape: obj.shape, name: obj.name });
-            const typeMap: Record<string, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
-            window.parent.postMessage({ type: 'OBJECT_ADDED', id: obj.id, name: obj.name, objType: typeMap[obj.shape] ?? 'Rect' }, '*');
-          } else if (obj.kind === 'sprite') {
-            const key = `asset_${obj.assetName}`;
-            const doAdd = () => {
-              const spr = this.add.sprite(obj.x, obj.y, key);
-              this.applyProps(spr, obj);
-              this.sprites.set(obj.id, spr);
-              this.spriteData.set(obj.id, { kind: 'sprite', name: obj.name, assetName: obj.assetName, assetFullPath: obj.assetFullPath });
-              window.parent.postMessage({ type: 'OBJECT_ADDED', id: obj.id, name: obj.name, objType: 'Sprite' }, '*');
-            };
-            if (this.textures.exists(key)) {
-              doAdd();
-            } else if (obj.dataUrl) {
-              this.textures.once('addtexture-' + key, doAdd);
-              this.textures.addBase64(key, obj.dataUrl);
-            }
-          }
-        }
-      }
-
-      if (m.type === 'ADD_PRIMITIVE') {
-        const shape = m.shape as 'rect' | 'circle' | 'triangle';
-        const key = `primitive_${shape}_${Date.now()}`;
-        const sz = 64;
-        const color = 0xffffff;
-        const g = this.add.graphics();
-        g.fillStyle(color, 1);
-        g.lineStyle(2, 0xffffff, 0.3);
-        if (shape === 'rect') {
-          g.fillRect(2, 2, sz - 4, sz - 4);
-          g.strokeRect(2, 2, sz - 4, sz - 4);
-        } else if (shape === 'circle') {
-          g.fillCircle(sz / 2, sz / 2, sz / 2 - 2);
-          g.strokeCircle(sz / 2, sz / 2, sz / 2 - 2);
-        } else if (shape === 'triangle') {
-          g.fillTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2);
-          g.strokeTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2);
-        }
-        g.generateTexture(key, sz, sz);
-        g.destroy();
-
-        const spr = this.add.sprite(CANVAS_W / 2, CANVAS_H / 2, key);
-        spr.setInteractive({ draggable: true });
-        const id = `${shape}_${Date.now()}`;
-        this.sprites.set(id, spr);
-        const names: Record<string, string> = { rect: 'Rectangle', circle: 'Circle', triangle: 'Triangle' };
-        const types: Record<string, string> = { rect: 'Rect', circle: 'Circle', triangle: 'Triangle' };
-        this.spriteData.set(id, { kind: 'primitive', shape, name: names[shape] });
-        window.parent.postMessage({ type: 'OBJECT_ADDED', id, name: names[shape], objType: types[shape] }, '*');
-        this.selectSprite(id, spr);
-      }
-
-      if (m.type === 'ADD_SPRITE_FROM_ASSET') {
-        const { file, x, y } = m;
-        const key = `asset_${file.name}`;
-        const doAdd = () => {
-          const spr = this.add.sprite(x, y, key);
-          spr.setInteractive({ draggable: true });
-          const id = `${file.name}_${Date.now()}`;
-          this.sprites.set(id, spr);
-          this.spriteData.set(id, { kind: 'sprite', name: file.name, assetName: file.name, assetFullPath: file.fullPath ?? '' });
-          window.parent.postMessage({ type: 'OBJECT_ADDED', id, name: file.name, objType: 'Sprite' }, '*');
-          this.selectSprite(id, spr);
-        };
-
-        if (this.textures.exists(key)) {
-          doAdd();
-        } else if (file.dataUrl) {
-          this.textures.once('addtexture-' + key, doAdd);
-          this.textures.addBase64(key, file.dataUrl);
-        } else {
-          // Placeholder if dataUrl not yet loaded
-          const g = this.add.graphics();
-          g.fillStyle(0x6366f1, 1);
-          g.fillRect(0, 0, 64, 64);
-          g.lineStyle(1, 0xa5b4fc, 0.5);
-          g.strokeRect(2, 2, 60, 60);
-          g.generateTexture(key, 64, 64);
-          g.destroy();
-          doAdd();
-        }
-      }
+    window.addEventListener('message', ev => this.onMessage(ev.data));
+    // Clicking the viewport focuses this iframe, so forward keys for the editor's shortcuts.
+    window.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && ['s', 'z', 'y'].includes(e.key.toLowerCase())) e.preventDefault();
+      post({ type: 'KEYDOWN', key: e.key, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
     });
-
-    // Ready — empty scene
-    window.parent.postMessage({ type: 'SCENE_READY', hierarchy: [] }, '*');
+    post({ type: 'SCENE_READY' });
   }
 
-  // ── Update ────────────────────────────────────────────────────────────
   update() {
-    if (!this.selectedSprite) {
-      this.selGfx.clear();
-      this.gizmoGfx.clear();
-      this.hideHandles();
-      return;
-    }
-    this.drawSelection(this.selectedSprite);
-    this.drawGizmo(this.selectedSprite);
-  }
-
-  // ── Selection box ─────────────────────────────────────────────────────
-  private drawSelection(s: Phaser.GameObjects.Sprite) {
-    const hw = s.displayWidth / 2 + 5;
-    const hh = s.displayHeight / 2 + 5;
+    const s = this.selectedSprite;
     this.selGfx.clear();
-    this.selGfx.lineStyle(4, 0x3b82f6, 0.25);
-    this.selGfx.strokeRect(s.x - hw - 2, s.y - hh - 2, (hw + 2) * 2, (hh + 2) * 2);
-    this.selGfx.lineStyle(1.5, 0x60a5fa, 1);
-    this.selGfx.strokeRect(s.x - hw, s.y - hh, hw * 2, hh * 2);
-    const hs = 5;
-    [[s.x - hw, s.y - hh], [s.x + hw, s.y - hh],
-     [s.x - hw, s.y + hh], [s.x + hw, s.y + hh]].forEach(([cx, cy]) => {
-      this.selGfx.fillStyle(0xffffff, 1);
-      this.selGfx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
-      this.selGfx.lineStyle(1, 0x3b82f6, 1);
-      this.selGfx.strokeRect(cx - hs / 2, cy - hs / 2, hs, hs);
-    });
-  }
-
-  // ── Gizmo dispatch ────────────────────────────────────────────────────
-  private drawGizmo(s: Phaser.GameObjects.Sprite) {
     this.gizmoGfx.clear();
     this.hideHandles();
-    const { x, y } = s;
-    const hw = s.displayWidth / 2;
-    const hh = s.displayHeight / 2;
-    if (this.toolMode === 'select' || this.toolMode === 'move') {
-      this.drawMoveGizmo(x, y, hw, hh);
-    } else if (this.toolMode === 'rotate') {
-      this.drawRotateGizmo(s, x, y, hw, hh);
-    } else if (this.toolMode === 'scale') {
-      this.drawScaleGizmo(x, y, hw, hh);
+    if (!s) return;
+    s.getBounds(this.bounds);
+    this.drawSelection(this.bounds);
+    if (this.toolMode === 'rotate') this.drawRotateGizmo(s, this.bounds);
+    else if (this.toolMode === 'scale') this.drawScaleGizmo(s, this.bounds);
+    else this.drawMoveGizmo(s, this.bounds);
+  }
+
+  private onMessage(m: any) {
+    if (!m?.type) return;
+    switch (m.type) {
+      case 'SET_TOOL_MODE': this.toolMode = m.mode; break;
+      case 'SET_SNAP': this.snapOn = m.enabled; break;
+      case 'SET_LOCKED_IDS': this.lockedIds = new Set(m.ids); break;
+      case 'RESET_CAMERA': this.cameras.main.setScroll(0, 0).setZoom(1); break;
+      case 'DESELECT_ALL': this.deselect(); break;
+
+      case 'RESET_SCENE':
+        this.clearScene();
+        post({ type: 'SCENE_READY' });
+        break;
+
+      case 'SELECT_OBJECT': {
+        const s = this.sprites.get(m.id);
+        if (s) this.selectSprite(m.id, s);
+        break;
+      }
+
+      case 'SET_PROPERTIES': {
+        const s = this.sprites.get(m.id);
+        if (s) this.applyProps(s, m);
+        break;
+      }
+
+      case 'DELETE_OBJECT': {
+        const s = this.sprites.get(m.id);
+        if (!s) break;
+        if (this.selectedSprite === s) this.deselect();
+        s.destroy();
+        this.sprites.delete(m.id);
+        this.spriteData.delete(m.id);
+        break;
+      }
+
+      case 'DUPLICATE_OBJECT': {
+        const src = this.sprites.get(m.id);
+        const data = this.spriteData.get(m.id);
+        if (!src || !data) break;
+        const copy = this.add.sprite(src.x + 20, src.y + 20, src.texture.key);
+        this.applyProps(copy, { ...this.serialize(src), x: copy.x, y: copy.y });
+        const type = data.shape ? SHAPE_TYPES[data.shape] : 'Sprite';
+        this.addObject(m.newId, copy, { ...data, name: `${data.name} Copy` }, type, true);
+        break;
+      }
+
+      case 'RENAME_OBJECT': {
+        const d = this.spriteData.get(m.id);
+        if (d) d.name = m.name;
+        break;
+      }
+
+      case 'GET_SCENE_STATE': {
+        const objects = [...this.sprites].map(([id, spr]) => {
+          const d = this.spriteData.get(id)!;
+          return { id, name: d.name, kind: d.kind, shape: d.shape, assetName: d.assetName, assetFullPath: d.assetFullPath, ...this.serialize(spr) };
+        });
+        post({ type: 'SCENE_STATE', objects });
+        break;
+      }
+
+      case 'LOAD_SCENE':
+        this.clearScene();
+        for (const obj of m.objects as any[]) {
+          const data: SpriteData = { kind: obj.kind, name: obj.name, shape: obj.shape, assetName: obj.assetName, assetFullPath: obj.assetFullPath };
+          if (obj.kind === 'primitive') {
+            const spr = this.add.sprite(obj.x, obj.y, this.primitiveTexture(obj.shape));
+            this.applyProps(spr, obj);
+            this.addObject(obj.id, spr, data, SHAPE_TYPES[obj.shape as Shape] ?? 'Rect', false, true);
+          } else if (obj.kind === 'sprite') {
+            this.withAssetTexture(obj.assetName, obj.dataUrl, key => {
+              const spr = this.add.sprite(obj.x, obj.y, key);
+              this.applyProps(spr, obj);
+              this.addObject(obj.id, spr, data, 'Sprite', false, true);
+            });
+          }
+        }
+        break;
+
+      case 'ADD_PRIMITIVE': {
+        const shape = m.shape as Shape;
+        const spr = this.add.sprite(CANVAS_W / 2, CANVAS_H / 2, this.primitiveTexture(shape));
+        this.addObject(`${shape}_${Date.now()}`, spr, { kind: 'primitive', shape, name: SHAPE_NAMES[shape] }, SHAPE_TYPES[shape], true);
+        break;
+      }
+
+      // screenX/screenY are iframe pixels; without them the sprite goes to the canvas center.
+      case 'ADD_SPRITE_FROM_ASSET': {
+        const { file } = m;
+        const { x, y } = m.screenX === undefined
+          ? { x: CANVAS_W / 2, y: CANVAS_H / 2 }
+          : this.cameras.main.getWorldPoint(this.scale.transformX(m.screenX), this.scale.transformY(m.screenY));
+        this.withAssetTexture(file.name, file.dataUrl, key => {
+          const data: SpriteData = { kind: 'sprite', name: file.name, assetName: file.name, assetFullPath: file.fullPath ?? '' };
+          this.addObject(`${file.name}_${Date.now()}`, this.add.sprite(Math.round(x), Math.round(y), key), data, 'Sprite', true);
+        });
+        break;
+      }
     }
   }
 
-  private drawMoveGizmo(x: number, y: number, hw: number, hh: number) {
-    const tip = ARROW_LEN;
-    this.gizmoGfx.lineStyle(3, 0xff4444, 1);
-    this.gizmoGfx.lineBetween(x + hw, y, x + hw + tip, y);
-    this.gizmoGfx.fillStyle(0xff4444, 1);
-    this.gizmoGfx.fillTriangle(x + hw + tip + 10, y, x + hw + tip - 1, y - 6, x + hw + tip - 1, y + 6);
-    this.gizmoGfx.lineStyle(3, 0x44ff44, 1);
-    this.gizmoGfx.lineBetween(x, y - hh, x, y - hh - tip);
-    this.gizmoGfx.fillStyle(0x44ff44, 1);
-    this.gizmoGfx.fillTriangle(x, y - hh - tip - 10, x - 6, y - hh - tip + 1, x + 6, y - hh - tip + 1);
-    this.gizmoGfx.fillStyle(0xffffff, 0.9);
-    this.gizmoGfx.fillRect(x - 6, y - 6, 12, 12);
-    this.gizmoGfx.lineStyle(1.5, 0x888888, 1);
-    this.gizmoGfx.strokeRect(x - 6, y - 6, 12, 12);
-    this.hX.setPosition(x + hw + tip + 5, y).setVisible(true);
-    this.hY.setPosition(x, y - hh - tip - 5).setVisible(true);
+  private addObject(id: string, spr: Sprite, data: SpriteData, objType: string, select: boolean, loaded = false) {
+    spr.setInteractive({ draggable: true });
+    this.sprites.set(id, spr);
+    this.spriteData.set(id, data);
+    post({ type: 'OBJECT_ADDED', id, name: data.name, objType, visible: spr.visible, loaded });
+    if (select) this.selectSprite(id, spr);
   }
 
-  private drawRotateGizmo(s: Phaser.GameObjects.Sprite, x: number, y: number, hw: number, hh: number) {
-    const R = ROT_RADIUS + Math.max(hw, hh);
-    this.gizmoGfx.lineStyle(2, 0xfbbf24, 0.8);
-    this.gizmoGfx.strokeCircle(x, y, R);
+  private clearScene() {
+    this.deselect();
+    for (const spr of this.sprites.values()) spr.destroy();
+    this.sprites.clear();
+    this.spriteData.clear();
+  }
+
+  private primitiveTexture(shape: Shape) {
+    const key = `prim_${shape}`;
+    if (this.textures.exists(key)) return key;
+    const sz = PRIMITIVE_SZ;
+    const g = this.add.graphics().fillStyle(0xffffff, 1).lineStyle(2, 0xffffff, 0.3);
+    if (shape === 'rect') g.fillRect(2, 2, sz - 4, sz - 4).strokeRect(2, 2, sz - 4, sz - 4);
+    if (shape === 'circle') g.fillCircle(sz / 2, sz / 2, sz / 2 - 2).strokeCircle(sz / 2, sz / 2, sz / 2 - 2);
+    if (shape === 'triangle') g.fillTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2).strokeTriangle(sz / 2, 2, sz - 2, sz - 2, 2, sz - 2);
+    g.generateTexture(key, sz, sz);
+    g.destroy();
+    return key;
+  }
+
+  /** Runs `cb` once the asset texture exists, loading it from `dataUrl` or falling back to a placeholder. */
+  private withAssetTexture(assetName: string, dataUrl: string | undefined, cb: (key: string) => void) {
+    const key = `asset_${assetName}`;
+    if (this.textures.exists(key)) return cb(key);
+    if (dataUrl) {
+      this.textures.once(`addtexture-${key}`, () => cb(key));
+      this.textures.addBase64(key, dataUrl);
+      return;
+    }
+    const g = this.add.graphics().fillStyle(0x6366f1, 1).fillRect(0, 0, 64, 64).lineStyle(1, 0xa5b4fc, 0.5).strokeRect(2, 2, 60, 60);
+    g.generateTexture(key, 64, 64);
+    g.destroy();
+    cb(key);
+  }
+
+  private serialize(spr: Sprite) {
+    return {
+      x: spr.x, y: spr.y, rotation: spr.rotation,
+      scaleX: spr.scaleX, scaleY: spr.scaleY,
+      alpha: spr.alpha, visible: spr.visible, depth: spr.depth,
+      originX: spr.originX, originY: spr.originY,
+      flipX: spr.flipX, flipY: spr.flipY,
+      scrollFactorX: spr.scrollFactorX, scrollFactorY: spr.scrollFactorY,
+      tint: hexTint(spr),
+    };
+  }
+
+  /** Applies only the props present in `p`. */
+  private applyProps(s: Sprite, p: any) {
+    if (p.x !== undefined) s.x = p.x;
+    if (p.y !== undefined) s.y = p.y;
+    if (p.rotation !== undefined) s.rotation = p.rotation;
+    if (p.scaleX !== undefined) s.scaleX = p.scaleX;
+    if (p.scaleY !== undefined) s.scaleY = p.scaleY;
+    if (p.alpha !== undefined) s.alpha = p.alpha;
+    if (p.visible !== undefined) s.visible = p.visible;
+    if (p.depth !== undefined) s.setDepth(p.depth);
+    if (p.tint !== undefined) s.setTint(parseInt(p.tint.replace('#', ''), 16));
+    if (p.originX !== undefined || p.originY !== undefined) s.setOrigin(p.originX ?? s.originX, p.originY ?? s.originY);
+    if (p.flipX !== undefined || p.flipY !== undefined) s.setFlip(p.flipX ?? s.flipX, p.flipY ?? s.flipY);
+    if (p.scrollFactorX !== undefined || p.scrollFactorY !== undefined)
+      s.setScrollFactor(p.scrollFactorX ?? s.scrollFactorX, p.scrollFactorY ?? s.scrollFactorY);
+  }
+
+  private drawCanvasFrame() {
+    this.add.graphics().setDepth(-2)
+      .fillStyle(0x060810, 1)
+      .fillRect(-4000, -4000, 8000 + CANVAS_W, 8000 + CANVAS_H);
+    this.add.graphics().setDepth(-1)
+      .fillStyle(0x111827, 1)
+      .fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    const border = this.add.graphics().setDepth(0);
+    border.lineStyle(1, 0x334155, 1).strokeRect(0, 0, CANVAS_W, CANVAS_H);
+    border.lineStyle(2, 0x475569, 1);
+    const tick = 16;
+    for (const [cx, cy] of [[0, 0], [CANVAS_W, 0], [0, CANVAS_H], [CANVAS_W, CANVAS_H]]) {
+      border.lineBetween(cx, cy, cx + (cx === 0 ? tick : -tick), cy);
+      border.lineBetween(cx, cy, cx, cy + (cy === 0 ? tick : -tick));
+    }
+
+    const grid = this.add.graphics().setDepth(0).lineStyle(1, 0xffffff, 0.04);
+    for (let x = 0; x <= CANVAS_W; x += GRID) grid.lineBetween(x, 0, x, CANVAS_H);
+    for (let y = 0; y <= CANVAS_H; y += GRID) grid.lineBetween(0, y, CANVAS_W, y);
+    grid.lineStyle(1, 0xffffff, 0.1)
+      .lineBetween(CANVAS_W / 2, 0, CANVAS_W / 2, CANVAS_H)
+      .lineBetween(0, CANVAS_H / 2, CANVAS_W, CANVAS_H / 2);
+  }
+
+  private drawSelection(b: Phaser.Geom.Rectangle) {
+    const pad = 5;
+    const x = b.x - pad, y = b.y - pad, w = b.width + pad * 2, h = b.height + pad * 2;
+    this.selGfx.lineStyle(4, 0x3b82f6, 0.25).strokeRect(x - 2, y - 2, w + 4, h + 4);
+    this.selGfx.lineStyle(1.5, 0x60a5fa, 1).strokeRect(x, y, w, h);
+    const hs = 5;
+    for (const [cx, cy] of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
+      this.selGfx.fillStyle(0xffffff, 1).fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+      this.selGfx.lineStyle(1, 0x3b82f6, 1).strokeRect(cx - hs / 2, cy - hs / 2, hs, hs);
+    }
+  }
+
+  private drawPivot(x: number, y: number) {
+    this.gizmoGfx.fillStyle(0xffffff, 0.9).fillRect(x - 6, y - 6, 12, 12);
+    this.gizmoGfx.lineStyle(1.5, 0x888888, 1).strokeRect(x - 6, y - 6, 12, 12);
+  }
+
+  private drawMoveGizmo(s: Sprite, b: Phaser.Geom.Rectangle) {
+    const { x, y } = s;
+    const tipX = b.right + ARROW_LEN;
+    const tipY = b.top - ARROW_LEN;
+    this.gizmoGfx.lineStyle(3, 0xff4444, 1).lineBetween(b.right, y, tipX, y);
+    this.gizmoGfx.fillStyle(0xff4444, 1).fillTriangle(tipX + 10, y, tipX - 1, y - 6, tipX - 1, y + 6);
+    this.gizmoGfx.lineStyle(3, 0x44ff44, 1).lineBetween(x, b.top, x, tipY);
+    this.gizmoGfx.fillStyle(0x44ff44, 1).fillTriangle(x, tipY - 10, x - 6, tipY + 1, x + 6, tipY + 1);
+    this.drawPivot(x, y);
+    this.hX.setPosition(tipX + 5, y).setVisible(true);
+    this.hY.setPosition(x, tipY - 5).setVisible(true);
+  }
+
+  private drawRotateGizmo(s: Sprite, b: Phaser.Geom.Rectangle) {
+    const { x, y } = s;
+    const r = ROT_RADIUS + Math.max(b.width, b.height) / 2;
     const ang = s.rotation - Math.PI / 2;
-    const hx = x + Math.cos(ang) * R;
-    const hy = y + Math.sin(ang) * R;
-    this.gizmoGfx.lineStyle(1.5, 0xfbbf24, 0.7);
-    this.gizmoGfx.lineBetween(x, y, hx, hy);
-    this.gizmoGfx.fillStyle(0xfbbf24, 1);
-    this.gizmoGfx.fillCircle(hx, hy, 7);
-    this.gizmoGfx.lineStyle(2, 0xffffff, 0.9);
-    this.gizmoGfx.strokeCircle(hx, hy, 7);
-    this.gizmoGfx.fillStyle(0xfbbf24, 0.7);
-    this.gizmoGfx.fillCircle(x, y, 4);
+    const hx = x + Math.cos(ang) * r;
+    const hy = y + Math.sin(ang) * r;
+    this.gizmoGfx.lineStyle(2, 0xfbbf24, 0.8).strokeCircle(x, y, r);
+    this.gizmoGfx.lineStyle(1.5, 0xfbbf24, 0.7).lineBetween(x, y, hx, hy);
+    this.gizmoGfx.fillStyle(0xfbbf24, 1).fillCircle(hx, hy, 7);
+    this.gizmoGfx.lineStyle(2, 0xffffff, 0.9).strokeCircle(hx, hy, 7);
+    this.gizmoGfx.fillStyle(0xfbbf24, 0.7).fillCircle(x, y, 4);
     this.hRot.setPosition(hx, hy).setVisible(true);
   }
 
-  private drawScaleGizmo(x: number, y: number, hw: number, hh: number) {
-    const tip = ARROW_LEN;
-    this.gizmoGfx.lineStyle(3, 0xf97316, 1);
-    this.gizmoGfx.lineBetween(x + hw, y, x + hw + tip, y);
-    this.gizmoGfx.fillStyle(0xf97316, 1);
-    this.gizmoGfx.fillRect(x + hw + tip - 6, y - 6, 12, 12);
-    this.gizmoGfx.lineStyle(3, 0x22d3ee, 1);
-    this.gizmoGfx.lineBetween(x, y - hh, x, y - hh - tip);
-    this.gizmoGfx.fillStyle(0x22d3ee, 1);
-    this.gizmoGfx.fillRect(x - 6, y - hh - tip - 6, 12, 12);
-    this.gizmoGfx.fillStyle(0xffffff, 0.9);
-    this.gizmoGfx.fillRect(x - 6, y - 6, 12, 12);
-    this.hSX.setPosition(x + hw + tip, y).setVisible(true);
-    this.hSY.setPosition(x, y - hh - tip).setVisible(true);
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────
-  private applyProps(spr: Phaser.GameObjects.Sprite, obj: any) {
-    spr.setInteractive({ draggable: true });
-    spr.setRotation(obj.rotation ?? 0);
-    spr.setScale(obj.scaleX ?? 1, obj.scaleY ?? 1);
-    spr.setAlpha(obj.alpha ?? 1);
-    spr.setVisible(obj.visible ?? true);
-    spr.setDepth(obj.depth ?? 0);
-    spr.setOrigin(obj.originX ?? 0.5, obj.originY ?? 0.5);
-    spr.setFlip(obj.flipX ?? false, obj.flipY ?? false);
-    spr.setScrollFactor(obj.scrollFactorX ?? 1, obj.scrollFactorY ?? 1);
-    if (obj.tint) spr.setTint(parseInt(obj.tint.replace('#', ''), 16));
+  private drawScaleGizmo(s: Sprite, b: Phaser.Geom.Rectangle) {
+    const { x, y } = s;
+    const tipX = b.right + ARROW_LEN;
+    const tipY = b.top - ARROW_LEN;
+    this.gizmoGfx.lineStyle(3, 0xf97316, 1).lineBetween(b.right, y, tipX, y);
+    this.gizmoGfx.fillStyle(0xf97316, 1).fillRect(tipX - 6, y - 6, 12, 12);
+    this.gizmoGfx.lineStyle(3, 0x22d3ee, 1).lineBetween(x, b.top, x, tipY);
+    this.gizmoGfx.fillStyle(0x22d3ee, 1).fillRect(x - 6, tipY - 6, 12, 12);
+    this.drawPivot(x, y);
+    this.hSX.setPosition(tipX, y).setVisible(true);
+    this.hSY.setPosition(x, tipY).setVisible(true);
   }
 
   private snap(v: number) {
-    return this.snapOn ? Math.round(v / this.SNAP) * this.SNAP : v;
+    return this.snapOn ? Math.round(v / GRID) * GRID : v;
   }
+
   private hideHandles() {
-    [this.hX, this.hY, this.hRot, this.hSX, this.hSY].forEach(h => h.setVisible(false));
+    for (const h of [this.hX, this.hY, this.hRot, this.hSX, this.hSY]) h.setVisible(false);
   }
-  private idOf(spr: Phaser.GameObjects.Sprite): string | null {
+
+  private idOf(spr: Sprite): string | null {
     for (const [id, s] of this.sprites) if (s === spr) return id;
     return null;
   }
 
-  private selectSprite(id: string, spr: Phaser.GameObjects.Sprite) {
+  private selectSprite(id: string, spr: Sprite) {
     this.selectedSprite = spr;
     this.selectedId = id;
-    window.parent.postMessage({
-      type: 'OBJECT_SELECTED', id,
-      x: spr.x, y: spr.y,
-      rotation: spr.rotation,
-      scaleX: spr.scaleX, scaleY: spr.scaleY,
-      alpha: spr.alpha,
-      tint: '#' + (spr.tintTopLeft || 0xffffff).toString(16).padStart(6, '0'),
-      visible: spr.visible,
-      depth: spr.depth,
-      originX: spr.originX, originY: spr.originY,
-      flipX: spr.flipX, flipY: spr.flipY,
-      scrollFactorX: spr.scrollFactorX, scrollFactorY: spr.scrollFactorY,
-      texW: spr.width, texH: spr.height,
-    }, '*');
+    post({ type: 'OBJECT_SELECTED', id, ...this.serialize(spr), texW: spr.width, texH: spr.height });
   }
 
   private deselect() {
     this.selectedSprite = null;
     this.selectedId = null;
-    window.parent.postMessage({ type: 'OBJECT_DESELECTED' }, '*');
+    post({ type: 'OBJECT_DESELECTED' });
   }
 
-  private notify() {
-    if (!this.selectedSprite || !this.selectedId) return;
+  private notifyTransform() {
     const s = this.selectedSprite;
-    window.parent.postMessage({
-      type: 'OBJECT_TRANSFORMED', id: this.selectedId,
-      x: s.x, y: s.y, rotation: s.rotation,
-      scaleX: s.scaleX, scaleY: s.scaleY,
-    }, '*');
-  }
-
-  private drawGrid() {
-    const C = 32;
-    this.gridGfx.lineStyle(1, 0xffffff, 0.04);
-    for (let x = 0; x <= CANVAS_W; x += C) this.gridGfx.lineBetween(x, 0, x, CANVAS_H);
-    for (let y = 0; y <= CANVAS_H; y += C) this.gridGfx.lineBetween(0, y, CANVAS_W, y);
-    // Center axis
-    this.gridGfx.lineStyle(1, 0xffffff, 0.1);
-    this.gridGfx.lineBetween(CANVAS_W / 2, 0, CANVAS_W / 2, CANVAS_H);
-    this.gridGfx.lineBetween(0, CANVAS_H / 2, CANVAS_W, CANVAS_H / 2);
+    if (!s || !this.selectedId) return;
+    post({ type: 'OBJECT_TRANSFORMED', id: this.selectedId, x: s.x, y: s.y, rotation: s.rotation, scaleX: s.scaleX, scaleY: s.scaleY });
   }
 }
 

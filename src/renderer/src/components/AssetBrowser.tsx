@@ -1,9 +1,11 @@
-import React, { useState, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
+import type React from 'react';
+import { beginDrag, clamp } from '../beginDrag';
 
-type AssetFile = { name: string; type: 'file'; path: string; fullPath: string; ext: string; };
-type AssetFolder = { name: string; type: 'folder'; path: string; children: AssetEntry[]; };
-type AssetEntry = AssetFile | AssetFolder;
 type ViewMode = 'list' | 'grid-sm' | 'grid-lg';
+
+const flatFiles = (entries: AssetEntry[]): AssetFile[] =>
+  entries.flatMap(e => e.type === 'file' ? [e] : flatFiles(e.children));
 
 interface Props {
   projectFolder: string | null;
@@ -11,16 +13,15 @@ interface Props {
   onDragAsset: (file: AssetFile) => void;
 }
 
-// ── FileThumb ─────────────────────────────────────────────────────────────────
 function FileThumb({ file, onDragAsset, viewMode }: {
   file: AssetFile; onDragAsset: (f: AssetFile) => void; viewMode: ViewMode;
 }) {
   const [src, setSrc] = useState<string | null>(null);
 
-  React.useEffect(() => {
-    (window as any).electronAPI?.fileToDataUrl(file.fullPath).then((url: string | null) => {
-      if (url) setSrc(url);
-    });
+  useEffect(() => {
+    let cancelled = false;
+    window.electronAPI.fileToDataUrl(file.fullPath).then(url => { if (!cancelled && url) setSrc(url); });
+    return () => { cancelled = true; };
   }, [file.fullPath]);
 
   const handleDragStart = (e: React.DragEvent) => {
@@ -61,7 +62,6 @@ function FileThumb({ file, onDragAsset, viewMode }: {
   );
 }
 
-// ── FolderNode (left tree — folders only) ────────────────────────────────────
 function FolderNode({ folder, selectedPath, onSelect, depth }: {
   folder: AssetFolder; selectedPath: string | null;
   onSelect: (f: AssetFolder) => void; depth: number;
@@ -91,7 +91,6 @@ function FolderNode({ folder, selectedPath, onSelect, depth }: {
   );
 }
 
-// ── AssetBrowser ──────────────────────────────────────────────────────────────
 export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset }: Props) {
   const [assets, setAssets] = useState<AssetEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -99,57 +98,25 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [selectedFolder, setSelectedFolder] = useState<AssetFolder | null>(null);
 
-  // Left panel resize
   const [leftW, setLeftW] = useState(140);
-  const divResizing = useRef(false);
-  const divStart = useRef({ x: 0, w: 0 });
 
-  const loadAssets = useCallback(async (folder: string) => {
-    setLoading(true);
-    try {
-      const result = await (window as any).electronAPI.readAssets(folder);
-      setAssets(result);
-      setSelectedFolder(null);
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    setSelectedFolder(null);
+    if (!projectFolder) {
+      setAssets([]);
+      return;
     }
-  }, []);
-
-  React.useEffect(() => {
-    if (projectFolder) loadAssets(projectFolder);
-    else setAssets([]);
+    let cancelled = false;
+    setLoading(true);
+    window.electronAPI.readAssets(projectFolder)
+      .then(result => { if (!cancelled) setAssets(result); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [projectFolder]);
 
-  const flatFiles = useCallback((entries: AssetEntry[]): AssetFile[] => {
-    const out: AssetFile[] = [];
-    for (const e of entries) {
-      if (e.type === 'file') out.push(e);
-      else out.push(...flatFiles(e.children));
-    }
-    return out;
-  }, []);
-
   const startDivResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    divResizing.current = true;
-    divStart.current = { x: e.clientX, w: leftW };
-    document.body.style.cursor = 'ew-resize';
-    document.body.style.userSelect = 'none';
-
-    const onMove = (ev: MouseEvent) => {
-      if (!divResizing.current) return;
-      const w = divStart.current.w + (ev.clientX - divStart.current.x);
-      setLeftW(Math.max(80, Math.min(280, w)));
-    };
-    const onUp = () => {
-      divResizing.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    const w0 = leftW;
+    beginDrag(e, 'ew-resize', dx => setLeftW(clamp(w0 + dx, 80, 280)));
   };
 
   if (!projectFolder) return (
@@ -166,12 +133,10 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
   const folders = assets.filter(e => e.type === 'folder') as AssetFolder[];
   const isGrid = viewMode !== 'list';
 
-  // Contents of selected folder (or root)
   const activeEntries: AssetEntry[] = selectedFolder ? selectedFolder.children : assets;
   const activeFiles = activeEntries.filter(e => e.type === 'file') as AssetFile[];
   const activeFolders = activeEntries.filter(e => e.type === 'folder') as AssetFolder[];
 
-  // Search overrides folder selection
   const searchResults = search.trim()
     ? flatFiles(assets).filter(f => f.name.toLowerCase().includes(search.toLowerCase()))
     : null;
@@ -186,7 +151,6 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-      {/* Toolbar */}
       <div className="px-2 py-1.5 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
         <input value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Search assets…"
@@ -198,17 +162,14 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
         </div>
       </div>
 
-      {/* Two-panel body */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* Left: Folder tree */}
         <div className="flex-shrink-0 overflow-y-auto border-r border-gray-700 py-1"
           style={{ width: leftW }}>
           {loading
             ? <p className="text-xs text-gray-600 text-center py-4">Scanning…</p>
             : (
               <>
-                {/* Root entry */}
                 <button
                   onClick={() => setSelectedFolder(null)}
                   className={`w-full flex items-center gap-1.5 px-2 py-1 text-xs rounded transition-colors text-left ${
@@ -224,27 +185,22 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
             )}
         </div>
 
-        {/* Divider */}
         <div onMouseDown={startDivResize}
           className="w-1 flex-shrink-0 cursor-ew-resize hover:bg-blue-500 transition-colors bg-transparent group">
           <div className="w-px h-full mx-auto bg-gray-700 group-hover:bg-blue-500 transition-colors" />
         </div>
 
-        {/* Right: File contents */}
         <div className="flex-1 overflow-y-auto p-1.5 min-w-0">
           {loading && <p className="text-xs text-gray-600 text-center py-4">Scanning…</p>}
 
           {searchResults ? (
-            // Search mode: flat list of all matches
             <div className={isGrid ? 'flex flex-wrap gap-1' : ''}>
               {searchResults.length === 0
                 ? <p className="text-xs text-gray-600 text-center py-4">No results.</p>
                 : searchResults.map(f => <FileThumb key={f.path} file={f} onDragAsset={onDragAsset} viewMode={viewMode} />)}
             </div>
           ) : (
-            // Normal mode: show selected folder contents
             <>
-              {/* Sub-folders as clickable cards */}
               {activeFolders.length > 0 && (
                 <div className={`mb-1 ${isGrid ? 'flex flex-wrap gap-1' : ''}`}>
                   {activeFolders.map(f => (
@@ -258,7 +214,6 @@ export default function AssetBrowser({ projectFolder, onOpenProject, onDragAsset
                   ))}
                 </div>
               )}
-              {/* Files */}
               {activeFiles.length === 0 && activeFolders.length === 0 && !loading && (
                 <p className="text-xs text-gray-600 text-center py-4">No images here.</p>
               )}
