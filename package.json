@@ -49,8 +49,8 @@
     ],
     "extraResources": [
       {
-        "from": "src/bridge/phaser-forge-bridge.js",
-        "to": "bridge/phaser-forge-bridge.js"
+        "from": "src/bridge",
+        "to": "bridge"
       }
     ],
     "win": {

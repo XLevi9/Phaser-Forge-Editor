@@ -23,6 +23,9 @@ type ShortcutKey = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey
 
 const api = window.electronAPI;
 const round2 = (n: number) => Math.round(n * 100) / 100;
+// Game objects are rarely named, so fall back to their text or texture before the generated id.
+const liveLabel = (o: BridgeObject) =>
+  o.name || (o.text !== undefined ? `"${o.text.replace(/\s+/g, ' ')}"` : o.textureKey) || o.id;
 
 const PANEL_H = { min: 72, max: 480, initial: 180 };
 const SIDE_W = { min: 140, max: 400 };
@@ -80,6 +83,7 @@ export default function App() {
   const [selectedScript, setSelectedScript] = useState('dev');
 
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('disconnected');
+  const [bridgeHasGame, setBridgeHasGame] = useState(true);
   const [bridgeScenes, setBridgeScenes] = useState<BridgeScene[]>([]);
   const [activeBridgeScene, setActiveBridgeScene] = useState<string | null>(null);
   const [bridgeObjects, setBridgeObjects] = useState<BridgeObject[]>([]);
@@ -131,6 +135,7 @@ export default function App() {
   // New game URL: reset bridge state and ping until the bridge answers (it also announces FORGE_READY itself).
   useEffect(() => {
     setBridgeStatus(devUrl ? 'connecting' : 'disconnected');
+    setBridgeHasGame(true);
     setBridgeScenes([]);
     setBridgeObjects([]);
     setBridgeSelected(null);
@@ -267,7 +272,10 @@ export default function App() {
     if (!projectFolder) return;
     const r = await api.installBridge(projectFolder);
     appendLog(r.ok
-      ? "\n[Bridge installed: phaser-forge-bridge.js]\n[Import it from your game entry, e.g. src/main.js: import '../phaser-forge-bridge.js']\n"
+      ? `\n[Bridge installed: phaser-forge-bridge.js]\n` +
+        `[Add it ONCE to ${r.entry ?? 'your game entry file'} (not to each scene) and pass your Phaser.Game:]\n` +
+        `  import { installForgeBridge } from '${r.importPath ?? './phaser-forge-bridge.js'}';${r.importPath ? '' : '  // path relative to that file'}\n` +
+        `  installForgeBridge(game);\n`
       : `\n[Bridge install failed: ${r.error ?? 'Unknown error'}]\n`);
     showConsole();
   };
@@ -394,7 +402,9 @@ export default function App() {
       case 'FORGE_PONG':
         setBridgeStatus('connected');
         if (pingTimerRef.current) clearInterval(pingTimerRef.current);
-        sendBridge({ type: 'FORGE_GET_SCENES' });
+        // Older bridges don't report hasGame.
+        setBridgeHasGame(m.hasGame !== false);
+        if (m.hasGame !== false) sendBridge({ type: 'FORGE_GET_SCENES' });
         break;
       case 'FORGE_SCENES': {
         const scenes: BridgeScene[] = m.scenes ?? [];
@@ -674,6 +684,11 @@ export default function App() {
                       Install Bridge
                     </button>
                   </div>
+                ) : !bridgeHasGame ? (
+                  <div className="p-4 text-xs text-gray-500 leading-relaxed">
+                    <p className="mb-2">Bridge is loaded but can't find your Phaser.Game. Pass it once from your entry file:</p>
+                    <code className="block bg-gray-900 rounded px-2 py-1.5 text-[10px] text-gray-300 font-mono select-text">installForgeBridge(game);</code>
+                  </div>
                 ) : bridgeObjects.length === 0 ? (
                   <p className="text-xs text-gray-600 text-center py-6">No objects in scene.</p>
                 ) : (
@@ -682,7 +697,7 @@ export default function App() {
                       className={`flex items-center gap-2 px-3 py-1.5 mx-1 rounded text-xs cursor-pointer transition-colors ${
                         bridgeSelectedId === obj.id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-700/60 hover:text-gray-200'}`}>
                       <span className="opacity-50 truncate max-w-16">{obj.type}</span>
-                      <span className="truncate flex-1">{obj.name || obj.id}</span>
+                      <span className="truncate flex-1">{liveLabel(obj)}</span>
                       <span className="text-[9px] text-gray-600 font-mono">{Math.round(obj.x)},{Math.round(obj.y)}</span>
                     </div>
                   ))
@@ -776,7 +791,7 @@ export default function App() {
               <div className="p-3 space-y-4 text-sm">
                 <div className="bg-gray-900 rounded px-3 py-2">
                   <div className="text-[10px] text-gray-500 mb-0.5">Type / Name</div>
-                  <div className="text-xs text-white font-mono truncate">{bridgeSelected.type} — {bridgeSelected.name || bridgeSelected.id}</div>
+                  <div className="text-xs text-white font-mono truncate">{bridgeSelected.type} — {liveLabel(bridgeSelected)}</div>
                   {bridgeSelected.textureKey && <div className="text-[10px] text-gray-500 mt-0.5">Texture: {bridgeSelected.textureKey}</div>}
                 </div>
                 <section>

@@ -82,6 +82,7 @@
 - [x] Protocol postMessage dua arah (lihat Catatan Arsitektur)
 - [x] Hierarchy panel populate dari data bridge
 - [x] Inspector terhubung ke object game asli (x, y, rotation, scale, alpha, depth, visible)
+- [x] Bridge v0.3: `installForgeBridge(game)` (tanpa perlu `window.game`), laporan `hasGame` + petunjuk di hierarchy, Install Bridge mencetak baris import yang tepat dari entry di `index.html`, plus `.d.ts` untuk project TypeScript
 - [ ] `SWITCH_SCENE` — pindah scene aktif di game (sekarang hanya bisa melihat object scene lain)
 
 ### 0.2.3 — Visual Overlay ✅ SELESAI

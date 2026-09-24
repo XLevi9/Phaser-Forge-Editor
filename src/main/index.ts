@@ -7,11 +7,13 @@ const IS_WIN = process.platform === 'win32';
 const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
 const DEV_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+/;
 const DEV_SERVER_TIMEOUT_MS = 30000;
+const BRIDGE_FILES = ['phaser-forge-bridge.js', 'phaser-forge-bridge.d.ts'];
 
 let mainWin: BrowserWindow | null = null;
 let devProc: ChildProcess | null = null;
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+const toPosix = (p: string) => p.replace(/\\/g, '/');
 const sendToRenderer = (channel: string, ...args: unknown[]) => mainWin?.webContents.send(channel, ...args);
 
 function readJson(file: string) {
@@ -38,6 +40,19 @@ function stopDevServer() {
   if (!proc?.pid || proc.exitCode !== null) return;
   if (IS_WIN) spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F']).on('error', () => {});
   else try { process.kill(-proc.pid, 'SIGTERM'); } catch { proc.kill(); }
+}
+
+/** The local `<script type="module" src>` in index.html, i.e. where the bridge should be installed. */
+function findEntryScript(folder: string): string | null {
+  let html: string;
+  try { html = fs.readFileSync(path.join(folder, 'index.html'), 'utf-8'); } catch { return null; }
+  for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
+    const src = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!/\btype\s*=\s*["']module["']/i.test(tag) || !src || /^[a-z]+:/i.test(src)) continue;
+    const file = path.join(folder, src.replace(/^\//, ''));
+    if (fs.existsSync(file)) return file;
+  }
+  return null;
 }
 
 function scanAssets(dir: string, base: string): unknown[] {
@@ -141,17 +156,20 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('bridge:install', (_e, folder: string) => {
-    const source = [
-      path.join(app.getAppPath(), 'src', 'bridge', 'phaser-forge-bridge.js'),
-      path.join(process.resourcesPath, 'bridge', 'phaser-forge-bridge.js'),
-    ].find(p => fs.existsSync(p));
-    if (!source) return { ok: false, error: 'Bridge SDK source file not found.' };
+    const sourceDir = [
+      path.join(app.getAppPath(), 'src', 'bridge'),
+      path.join(process.resourcesPath, 'bridge'),
+    ].find(dir => fs.existsSync(path.join(dir, BRIDGE_FILES[0])));
+    if (!sourceDir) return { ok: false, error: 'Bridge SDK source file not found.' };
     try {
-      fs.copyFileSync(source, path.join(folder, 'phaser-forge-bridge.js'));
-      return { ok: true };
+      for (const file of BRIDGE_FILES) fs.copyFileSync(path.join(sourceDir, file), path.join(folder, file));
     } catch (e) {
       return { ok: false, error: (e as Error).message };
     }
+    const entry = findEntryScript(folder);
+    if (!entry) return { ok: true };
+    const importPath = toPosix(path.relative(path.dirname(entry), path.join(folder, BRIDGE_FILES[0])));
+    return { ok: true, entry: toPosix(path.relative(folder, entry)), importPath: importPath.startsWith('.') ? importPath : `./${importPath}` };
   });
 
   ipcMain.handle('fs:readAssets', (_e, folder: string) => {
