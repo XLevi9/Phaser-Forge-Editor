@@ -136,4 +136,4 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). Next up: scene switching from the editor
 
 ## License
 
-MIT — built for personal use first, open to whoever finds it useful.
+[MIT](LICENSE) — built for personal use first, open to whoever finds it useful.
