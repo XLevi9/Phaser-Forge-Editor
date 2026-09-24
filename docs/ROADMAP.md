@@ -2,9 +2,9 @@
 
 > Tujuan akhir: Game engine editor untuk Phaser 4, seperti Phaser Editor berbayar — tapi open source dan terhubung ke workflow ngoding nyata (VS Code + Vite HMR).
 
-**Last updated:** 2026-05-07  
+**Last updated:** 2026-09-24  
 **Current branch:** `feature/game-engine-core`  
-**Current version:** v0.2.1-dev
+**Current version:** v0.2.3-dev
 
 ---
 
@@ -69,35 +69,34 @@
 - [x] Detect port dari output Vite — strip ANSI codes sebelum regex match
 - [x] Viewport iframe switch ke `localhost:PORT` saat server ready
 - [x] Console tab di footer — stream output dev server real-time dengan auto-scroll
-- [x] Stop dev server (button + saat app quit — tidak ada orphan process)
+- [x] Stop dev server (button + saat app quit) — kill seluruh process tree (`taskkill /T` di Windows, process group di macOS/Linux)
+- [x] Pilih dev script dari `package.json` (`dev`, `dev:*`, `*:dev:*`), tersimpan di `.phaser-forge.json`
 - [x] LIVE badge di viewport saat game berjalan
 - [x] VS Code button — `code [projectFolder]`
 - [x] `webSecurity: false` agar iframe bisa load localhost dari file:// protocol
 
-### 0.2.2 — Editor Bridge SDK
+### 0.2.2 — Editor Bridge SDK ✅ SELESAI
 > Agar editor bisa "baca" dan "kontrol" object dari game Phaser yang running.
-- [ ] Buat `phaser-forge-bridge.js` — satu file yang user tambahkan ke game mereka
-- [ ] Bridge scan `scene.children.list` saat diminta
-- [ ] Protocol postMessage dua arah:
-  - `GET_SCENE_OBJECTS` → bridge kirim list semua object + props
-  - `SELECT_OBJECT (id)` → bridge highlight object, kirim full props
-  - `SET_PROPERTY (id, key, value)` → bridge update object live
-  - `GET_SCENES` → list semua scene yang terdaftar
-  - `SWITCH_SCENE (key)` → pindah ke scene lain
-- [ ] Hierarchy panel populate dari data bridge (bukan list manual kita)
-- [ ] Inspector panel terhubung ke object game asli
+- [x] `src/bridge/phaser-forge-bridge.js` — satu file yang di-copy ke project (tombol Install Bridge)
+- [x] Bridge scan `scene.children.list` saat diminta
+- [x] Protocol postMessage dua arah (lihat Catatan Arsitektur)
+- [x] Hierarchy panel populate dari data bridge
+- [x] Inspector terhubung ke object game asli (x, y, rotation, scale, alpha, depth, visible)
+- [ ] `SWITCH_SCENE` — pindah scene aktif di game (sekarang hanya bisa melihat object scene lain)
 
-### 0.2.3 — Visual Overlay
+### 0.2.3 — Visual Overlay ✅ SELESAI
 > Gizmos di atas game yang running — bukan di dalam game.
-- [ ] Canvas transparan overlay di atas iframe game
-- [ ] Click di overlay → tanya bridge object apa di titik itu → select
-- [ ] Selection box di overlay (tidak memodifikasi game)
-- [ ] Move gizmo → drag di overlay → kirim SET_PROPERTY position ke bridge
+- [x] Overlay DOM transparan di atas iframe game, toggle 🎯 Edit / 🎮 Play
+- [x] Click di overlay → bridge hit-test (depth + urutan display list) → select
+- [x] Selection box di overlay, refresh tiap 500ms mengikuti object yang bergerak
+- [x] Drag object terpilih di overlay → `FORGE_MOVE_OBJECT`
 
 ### 0.2.4 — Scene Awareness
-- [ ] Editor tau scene mana yang aktif
+- [x] Editor tau scene mana yang aktif (dropdown scene di hierarchy)
 - [ ] Switch scene dari hierarchy
 - [ ] Hierarchy refresh otomatis saat scene berubah (scene-transition aware)
+- [ ] Rotate/scale gizmo di live mode
+- [ ] Tulis perubahan live kembali ke kode / scene file
 
 ---
 
@@ -203,16 +202,18 @@
 
 ## Catatan Arsitektur
 
-### Bridge Protocol (postMessage)
+### Bridge Protocol (postMessage, semua pesan membawa `forge: true`)
 ```
-Editor → Game:                    Game → Editor:
-GET_SCENE_OBJECTS                 SCENE_OBJECTS (list + props)
-SELECT_OBJECT (id)                OBJECT_SELECTED (full props)
-SET_PROPERTIES (id, props)        OBJECT_UPDATED (new props)
-GET_SCENES                        SCENES_LIST
-SWITCH_SCENE (key)                SCENE_SWITCHED
-PAUSE / RESUME                    PAUSED / RESUMED
+Editor → Game:                                  Game → Editor:
+FORGE_PING                                      FORGE_PONG / FORGE_READY (saat load)
+FORGE_GET_SCENES                                FORGE_SCENES (key, active, visible)
+FORGE_GET_OBJECTS (sceneKey)                    FORGE_OBJECTS (list + props)
+FORGE_SELECT (id)                               FORGE_SELECTED (props + screenBounds)
+FORGE_PICK_OBJECT (viewportX, viewportY)        FORGE_SELECTED / FORGE_DESELECTED
+FORGE_SET_PROP (id, prop, value)                FORGE_PROP_SET (props + screenBounds)
+FORGE_MOVE_OBJECT (id, startX/Y, dx, dy)        FORGE_SELECTED (reason: move)
 ```
+Belum ada: `SWITCH_SCENE`, `PAUSE` / `RESUME`.
 
 ### File Structure per Project Game User
 ```

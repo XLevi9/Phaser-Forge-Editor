@@ -32,17 +32,22 @@ Phaser Forge lets you drag that sprite to where it looks right, see the numbers 
 - **Inspector** — edit x, y, rotation, scaleX/Y, alpha, tint, visible, depth, originX/Y with live feedback
 - **Origin presets** — 9-point grid (TL/TC/TR/CL/C/CR/BL/BC/BR) so origin always matches your game
 - **Asset browser** — scan your project's `/assets` folder, drag images onto the viewport
+- **Primitives** — add rectangles, circles and triangles as placeholders
 - **Camera pan/zoom** — middle mouse to pan, scroll wheel to zoom toward cursor, F to reset
-- **Hierarchy panel** — list of all scene objects, click to select, right-click for rename/duplicate/delete
-- **Undo/Redo** — Ctrl+Z / Ctrl+Y, 30+ steps
+- **Hierarchy panel** — click to select, right-click for rename/duplicate/delete, per-object lock and visibility
+- **Undo/Redo** — Ctrl+Z / Ctrl+Y, up to 100 steps
 - **Snap to grid** — toggleable 32px snap
-- **Per-project config** — canvas size saved to `.phaser-forge.json` so each project remembers its setup
+- **Save / load** — layout stored in `forge-scene.json` in your project (Ctrl+S)
+- **Per-project config** — canvas size and dev script saved to `.phaser-forge.json`
+- **Live mode** — run your game's dev server from the editor, inspect and move objects of the running game through a small bridge script
 
 ---
 
 ## How It Works
 
-The editor and your game are **separate**. The editor is a design tool — you place objects visually, read the coordinates from the inspector, and write them into your game code.
+The editor has two modes.
+
+**Design mode** — the editor renders its own Phaser 4 scene. You place objects visually, read the coordinates from the inspector, and write them into your game code.
 
 ```
 Editor viewport (1280×720 canvas)
@@ -53,7 +58,16 @@ Your game code:
   this.add.image(935, 115, 'barn').setOrigin(0.5);  ← exact match ✅
 ```
 
-No plugins or modifications needed in your game project.
+Design mode needs no changes to your game project.
+
+**Live mode** — press **▶ Run Game** and the editor runs your project's dev script (`dev`, `dev:*` or `*:dev:*` from `package.json`), then loads the game from its localhost URL. To inspect it, click **Install Bridge** and import the copied file from your entry point:
+
+```js
+// src/main.js
+import '../phaser-forge-bridge.js';
+```
+
+The bridge only activates when the game runs inside the editor. It looks for the game on `window.game` or `window.__phaserGame`, so expose your `Phaser.Game` instance there if it isn't found. Switch to **🎯 Edit** to click objects in the running game, drag them, and tweak position, rotation, scale, alpha, depth and visibility. Live edits change the running game only; copy the values into your code.
 
 ---
 
@@ -61,7 +75,7 @@ No plugins or modifications needed in your game project.
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20.19+ or 22.12+
 - A Phaser 4 game project (for the asset browser and coordinate reference)
 
 ### Install & Run
@@ -91,7 +105,7 @@ npm run dev
 | Build | Vite (via electron-vite) |
 | Game renderer | Phaser 4 (in iframe) |
 | State | Zustand |
-| Communication | `postMessage` (React ↔ Phaser iframe) |
+| Communication | `postMessage` (React ↔ editor iframe / live game bridge) |
 
 ---
 
@@ -105,7 +119,8 @@ npm run dev
 | `R` | Scale tool |
 | `F` | Reset camera view |
 | `Ctrl+Z` | Undo |
-| `Ctrl+Y` | Redo |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
+| `Ctrl+S` | Save scene |
 | `Del` | Delete selected object |
 | `Esc` | Deselect |
 | Middle mouse | Pan camera |
@@ -115,12 +130,7 @@ npm run dev
 
 ## Roadmap
 
-- [ ] Save / load scene as JSON
-- [ ] Code generation — export scene as Phaser 4 `create()` function
-- [ ] Multi-select
-- [ ] Flip X/Y, setCrop, setDisplaySize in inspector
-- [ ] Connect to running game dev server (live bridge)
-- [ ] Package as installable app (.exe / .dmg / .AppImage)
+See [docs/ROADMAP.md](docs/ROADMAP.md). Next up: scene switching from the editor, code generation, and multi-select.
 
 ---
 
