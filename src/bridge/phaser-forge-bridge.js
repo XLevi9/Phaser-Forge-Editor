@@ -1,17 +1,32 @@
-// phaser-forge-bridge.js - Phaser Forge Editor Bridge v0.2
-// Add to your game entry point. If this file is in the project root and
-// your entry is src/main.js, use: import '../phaser-forge-bridge.js'
+// phaser-forge-bridge.js — Phaser Forge Editor Bridge v0.2
+// Import it from your game entry point, e.g. in src/main.js: import '../phaser-forge-bridge.js'
+// It does nothing unless the game runs inside the editor's iframe.
 
 if (window.parent !== window) {
-  let _idCounter = 0;
-  const _objMap = new Map();
+  const VERSION = '0.2';
+  const SETTABLE_PROPS = new Set(['x', 'y', 'rotation', 'scaleX', 'scaleY', 'alpha', 'visible']);
+  const objects = new Map();
+  let nextId = 0;
+  let cachedGame = null;
+
+  const send = (msg) => window.parent.postMessage({ forge: true, ...msg }, '*');
+  const sceneKey = (scene) => scene?.sys?.settings?.key;
 
   function ensureId(obj) {
     if (!obj.__forgeId) {
-      obj.__forgeId = 'forge_' + (_idCounter++);
-      _objMap.set(obj.__forgeId, obj);
+      const id = 'forge_' + nextId++;
+      obj.__forgeId = id;
+      objects.set(id, obj);
+      obj.once?.('destroy', () => objects.delete(id));
     }
     return obj.__forgeId;
+  }
+
+  function getGame() {
+    if (cachedGame?.canvas?.isConnected) return cachedGame;
+    cachedGame = window.game || window.__phaserGame ||
+      Object.values(window).find(v => v?.constructor?.name === 'Game') || null;
+    return cachedGame;
   }
 
   function getProps(obj) {
@@ -30,159 +45,127 @@ if (window.parent !== window) {
       originX: obj.originX ?? 0.5,
       originY: obj.originY ?? 0.5,
     };
-    if (obj.texture?.key && obj.texture.key !== '__DEFAULT' && obj.texture.key !== '__MISSING') {
-      p.textureKey = obj.texture.key;
-    }
+    const key = obj.texture?.key;
+    if (key && key !== '__DEFAULT' && key !== '__MISSING') p.textureKey = key;
     if (typeof obj.text === 'string') p.text = obj.text;
     if (obj.displayWidth) p.displayWidth = Math.round(obj.displayWidth);
     if (obj.displayHeight) p.displayHeight = Math.round(obj.displayHeight);
     return p;
   }
 
-  function getGame() {
-    return window.game || window.__phaserGame ||
-      Object.values(window).find(v => v?.constructor?.name === 'Game');
-  }
-
   function getBounds(obj) {
-    const dw = obj.displayWidth ?? obj.width ?? 32;
-    const dh = obj.displayHeight ?? obj.height ?? 32;
-    const ox = obj.originX ?? 0.5;
-    const oy = obj.originY ?? 0.5;
-    let bounds = { x: (obj.x ?? 0) - dw * ox, y: (obj.y ?? 0) - dh * oy, width: dw, height: dh };
     try {
       const b = obj.getBounds?.();
-      if (b && b.width > 0) bounds = b;
+      if (b && b.width > 0) return b;
     } catch (_) {}
-    return bounds;
+    const w = obj.displayWidth ?? obj.width ?? 32;
+    const h = obj.displayHeight ?? obj.height ?? 32;
+    return { x: (obj.x ?? 0) - w * (obj.originX ?? 0.5), y: (obj.y ?? 0) - h * (obj.originY ?? 0.5), width: w, height: h };
   }
 
-  function getScreenBounds(scene, bounds) {
+  // World-space bounds → iframe viewport pixels, accounting for camera and canvas CSS scaling.
+  function getScreenBounds(scene, b) {
     const canvas = scene?.game?.canvas;
     const cam = scene?.cameras?.main;
     if (!canvas || !cam) return null;
     const rect = canvas.getBoundingClientRect();
-    const scaleX = rect.width / canvas.width;
-    const scaleY = rect.height / canvas.height;
-    const x = (bounds.x - cam.scrollX) * cam.zoom;
-    const y = (bounds.y - cam.scrollY) * cam.zoom;
-    const width = bounds.width * cam.zoom;
-    const height = bounds.height * cam.zoom;
+    const sx = (rect.width / canvas.width) * cam.zoom;
+    const sy = (rect.height / canvas.height) * cam.zoom;
     return {
-      x: rect.left + x * scaleX,
-      y: rect.top + y * scaleY,
-      width: width * scaleX,
-      height: height * scaleY,
+      x: rect.left + (b.x - cam.scrollX) * sx,
+      y: rect.top + (b.y - cam.scrollY) * sy,
+      width: b.width * sx,
+      height: b.height * sy,
     };
   }
 
-  function sendSelected(scene, obj, reason) {
+  function sendSelected(obj, reason) {
     const bounds = getBounds(obj);
-    window.parent.postMessage({
-      forge: true,
+    send({
       type: 'FORGE_SELECTED',
       id: ensureId(obj),
-      sceneKey: scene?.sys?.settings?.key,
+      sceneKey: sceneKey(obj.scene),
       reason,
       props: getProps(obj),
       bounds,
-      screenBounds: getScreenBounds(scene, bounds),
-    }, '*');
-  }
-
-  function pickObject(scene, gameX, gameY) {
-    const cam = scene.cameras?.main;
-    const point = cam?.getWorldPoint ? cam.getWorldPoint(gameX, gameY) : { x: gameX, y: gameY };
-    const list = scene.children?.list ?? [];
-    const objects = list
-      .filter(obj => !obj.__forgeInternal && obj.active !== false && obj.visible !== false)
-      .slice()
-      .sort((a, b) => ((b.depth ?? 0) - (a.depth ?? 0)) || (list.indexOf(b) - list.indexOf(a)));
-    return objects.find(obj => {
-      const b = getBounds(obj);
-      return point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height;
+      screenBounds: getScreenBounds(obj.scene, bounds),
     });
   }
 
-  window.addEventListener('message', (ev) => {
-    if (!ev.data?.forge) return;
-    const m = ev.data;
-    const game = getGame();
-
-    if (m.type === 'FORGE_PING') {
-      window.parent.postMessage({ forge: true, type: 'FORGE_PONG', version: '0.2' }, '*');
+  function pickObject(scene, gameX, gameY) {
+    const point = scene.cameras?.main?.getWorldPoint?.(gameX, gameY) ?? { x: gameX, y: gameY };
+    const list = scene.children?.list ?? [];
+    let best = null;
+    let bestDepth = -Infinity;
+    // Walk from the top of the display list; a lower entry only wins with a strictly higher depth.
+    for (let i = list.length - 1; i >= 0; i--) {
+      const obj = list[i];
+      if (obj.__forgeInternal || obj.active === false || obj.visible === false) continue;
+      const depth = obj.depth ?? 0;
+      if (depth <= bestDepth) continue;
+      const b = getBounds(obj);
+      if (point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height) {
+        best = obj;
+        bestDepth = depth;
+      }
     }
+    return best;
+  }
 
-    if (m.type === 'FORGE_GET_SCENES') {
-      if (!game) return;
+  const handlers = {
+    FORGE_PING() {
+      send({ type: 'FORGE_PONG', version: VERSION });
+    },
+
+    FORGE_GET_SCENES(_m, game) {
       const scenes = game.scene.scenes
         .filter(s => s.sys.settings.status > 0)
-        .map(s => ({
-          key: s.sys.settings.key,
-          active: s.sys.isActive(),
-          visible: s.sys.isVisible(),
-        }));
-      window.parent.postMessage({ forge: true, type: 'FORGE_SCENES', scenes }, '*');
-    }
+        .map(s => ({ key: sceneKey(s), active: s.sys.isActive(), visible: s.sys.isVisible() }));
+      send({ type: 'FORGE_SCENES', scenes });
+    },
 
-    if (m.type === 'FORGE_GET_OBJECTS') {
-      if (!game) return;
+    FORGE_GET_OBJECTS(m, game) {
       const scene = game.scene.getScene(m.sceneKey);
       if (!scene) return;
-      const objects = scene.children.list
-        .filter(obj => !obj.__forgeInternal && obj.active !== false)
-        .map(getProps);
-      window.parent.postMessage({ forge: true, type: 'FORGE_OBJECTS', sceneKey: m.sceneKey, objects }, '*');
-    }
+      const list = scene.children.list.filter(obj => !obj.__forgeInternal && obj.active !== false).map(getProps);
+      send({ type: 'FORGE_OBJECTS', sceneKey: m.sceneKey, objects: list });
+    },
 
-    if (m.type === 'FORGE_SET_PROP') {
-      const obj = _objMap.get(m.id);
+    FORGE_SET_PROP(m) {
+      const obj = objects.get(m.id);
       if (!obj) return;
-      const v = m.value;
-      const prop = m.prop;
-      if (prop === 'x') obj.x = v;
-      else if (prop === 'y') obj.y = v;
-      else if (prop === 'rotation') obj.rotation = v;
-      else if (prop === 'scaleX') obj.scaleX = v;
-      else if (prop === 'scaleY') obj.scaleY = v;
-      else if (prop === 'alpha') obj.alpha = v;
-      else if (prop === 'visible') obj.visible = v;
-      else if (prop === 'depth') obj.setDepth?.(v);
-      const bounds = getBounds(obj);
-      window.parent.postMessage({
-        forge: true,
+      if (m.prop === 'depth') obj.setDepth?.(m.value);
+      else if (SETTABLE_PROPS.has(m.prop)) obj[m.prop] = m.value;
+      else return;
+      send({
         type: 'FORGE_PROP_SET',
         id: m.id,
-        sceneKey: obj.scene?.sys?.settings?.key,
-        prop,
-        value: v,
+        sceneKey: sceneKey(obj.scene),
+        prop: m.prop,
+        value: m.value,
         props: getProps(obj),
-        screenBounds: getScreenBounds(obj.scene, bounds),
-      }, '*');
-    }
+        screenBounds: getScreenBounds(obj.scene, getBounds(obj)),
+      });
+    },
 
-    if (m.type === 'FORGE_SELECT') {
-      const obj = _objMap.get(m.id);
-      if (!obj) return;
-      sendSelected(obj.scene, obj, m.reason);
-    }
+    FORGE_SELECT(m) {
+      const obj = objects.get(m.id);
+      if (obj) sendSelected(obj, m.reason);
+    },
 
-    if (m.type === 'FORGE_MOVE_OBJECT') {
-      const obj = _objMap.get(m.id);
-      if (!obj) return;
-      const canvas = obj.scene?.game?.canvas;
-      const cam = obj.scene?.cameras?.main;
+    // dx/dy are iframe pixels since drag start; convert to world units.
+    FORGE_MOVE_OBJECT(m) {
+      const obj = objects.get(m.id);
+      const canvas = obj?.scene?.game?.canvas;
+      const cam = obj?.scene?.cameras?.main;
       if (!canvas || !cam) return;
       const rect = canvas.getBoundingClientRect();
-      const dx = (m.dx * (canvas.width / rect.width)) / cam.zoom;
-      const dy = (m.dy * (canvas.height / rect.height)) / cam.zoom;
-      obj.x = m.startX + dx;
-      obj.y = m.startY + dy;
-      sendSelected(obj.scene, obj, 'move');
-    }
+      obj.x = m.startX + (m.dx * (canvas.width / rect.width)) / cam.zoom;
+      obj.y = m.startY + (m.dy * (canvas.height / rect.height)) / cam.zoom;
+      sendSelected(obj, 'move');
+    },
 
-    if (m.type === 'FORGE_PICK_OBJECT') {
-      if (!game) return;
+    FORGE_PICK_OBJECT(m, game) {
       const canvas = game.canvas;
       const rect = canvas.getBoundingClientRect();
       const gameX = (m.viewportX - rect.left) * (canvas.width / rect.width);
@@ -192,24 +175,23 @@ if (window.parent !== window) {
         preferred,
         ...game.scene.scenes.filter(s => s !== preferred && s.sys?.isActive?.() && s.sys?.isVisible?.()),
       ].filter(Boolean);
-      const picked = scenes
-        .map(scene => ({ scene, hit: pickObject(scene, gameX, gameY) }))
-        .find(r => r.hit);
-      if (picked) sendSelected(picked.scene, picked.hit);
-      else {
-        window.parent.postMessage({
-          forge: true,
-          type: 'FORGE_PICK_DEBUG',
-          x: Math.round(gameX),
-          y: Math.round(gameY),
-          scenes: scenes.map(s => ({ key: s.sys?.settings?.key, objects: s.children?.list?.length ?? 0 })),
-        }, '*');
-        window.parent.postMessage({ forge: true, type: 'FORGE_DESELECTED' }, '*');
+      for (const scene of scenes) {
+        const hit = pickObject(scene, gameX, gameY);
+        if (hit) return sendSelected(hit, 'pick');
       }
-    }
+      send({ type: 'FORGE_DESELECTED' });
+    },
+  };
+
+  window.addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (!m?.forge || !handlers[m.type]) return;
+    const game = getGame();
+    if (!game && m.type !== 'FORGE_PING') return;
+    handlers[m.type](m, game);
   });
 
-  const announce = () => window.parent.postMessage({ forge: true, type: 'FORGE_READY' }, '*');
-  if (document.readyState === 'complete') setTimeout(announce, 800);
-  else window.addEventListener('load', () => setTimeout(announce, 800));
+  const announce = () => setTimeout(() => send({ type: 'FORGE_READY' }), 800);
+  if (document.readyState === 'complete') announce();
+  else window.addEventListener('load', announce);
 }
