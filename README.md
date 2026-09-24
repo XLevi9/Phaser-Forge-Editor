@@ -60,14 +60,25 @@ Your game code:
 
 Design mode needs no changes to your game project.
 
-**Live mode** — press **▶ Run Game** and the editor runs your project's dev script (`dev`, `dev:*` or `*:dev:*` from `package.json`), then loads the game from its localhost URL. To inspect it, click **Install Bridge** and import the copied file from your entry point:
+**Live mode** — press **▶ Run Game** and the editor runs your project's dev script (`dev`, `dev:*` or `*:dev:*` from `package.json`), then loads the game from its localhost URL. To inspect it, click **Install Bridge**: it copies `phaser-forge-bridge.js` (plus a `.d.ts` for TypeScript) to your project root and prints the exact import line for your entry file. Add it **once** — not in every scene — and pass your game instance:
 
 ```js
-// src/main.js
-import '../phaser-forge-bridge.js';
+// src/main.js (entry from index.html)
+import StartGame from './game/main';
+import { installForgeBridge } from '../phaser-forge-bridge.js';
+
+document.addEventListener('DOMContentLoaded', () => {
+  installForgeBridge(StartGame('game-container')); // StartGame returns the Phaser.Game
+});
 ```
 
-The bridge only activates when the game runs inside the editor. It looks for the game on `window.game` or `window.__phaserGame`, so expose your `Phaser.Game` instance there if it isn't found. Switch to **🎯 Edit** to click objects in the running game, drag them, and tweak position, rotation, scale, alpha, depth and visibility. Live edits change the running game only; copy the values into your code.
+One install covers every scene. The bridge does nothing outside the editor, so it is safe to leave in; to keep it out of production builds, load it only in dev:
+
+```js
+if (import.meta.env.DEV) import('../phaser-forge-bridge.js').then(m => m.installForgeBridge(game));
+```
+
+If you can't pass the game, `import '../phaser-forge-bridge.js'` alone also works when the game is on `window.game` or `window.__phaserGame`. Switch to **🎯 Edit** to click objects in the running game, drag them, and tweak position, rotation, scale, alpha, depth and visibility. Live edits change the running game only; copy the values into your code.
 
 ---
 
