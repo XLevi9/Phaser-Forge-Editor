@@ -102,7 +102,11 @@ export default function App() {
     moved: boolean;
   } | null>(null);
 
-  const send = useCallback((msg: object) => iframeRef.current?.contentWindow?.postMessage(msg, '*'), []);
+  // The editor view is file:// in builds (opaque origin), so only the live game can be pinned.
+  const send = useCallback(
+    (msg: object) => iframeRef.current?.contentWindow?.postMessage(msg, devUrl ? new URL(devUrl).origin : '*'),
+    [devUrl],
+  );
   const sendBridge = useCallback((msg: object) => send({ forge: true, ...msg }), [send]);
   const requestBridgeObjects = useCallback((sceneKey: string) => sendBridge({ type: 'FORGE_GET_OBJECTS', sceneKey }), [sendBridge]);
   const appendLog = useCallback((text: string) => setDevLogs(prev => prev + text), []);
@@ -255,8 +259,7 @@ export default function App() {
   const handleRunStop = async () => {
     if (devStatus === 'running' || devStatus === 'starting') return stopDev();
     if (!projectFolder) return;
-    // Starting the game replaces the editor scene, so persist unsaved work first.
-    if (saveStatus === 'unsaved') handleSave();
+    if (saveStatus === 'unsaved' && !window.confirm('Running the game discards unsaved scene changes. Run anyway?')) return;
     setDevStatus('starting');
     setDevLogs('');
     showConsole();
@@ -519,7 +522,9 @@ export default function App() {
   });
 
   useEffect(() => {
-    const handleMessage = (ev: MessageEvent) => onMessage.current(ev.data);
+    const handleMessage = (ev: MessageEvent) => {
+      if (ev.source === iframeRef.current?.contentWindow) onMessage.current(ev.data);
+    };
     const handleKey = (ev: KeyboardEvent) => {
       if (!isTyping(ev.target) && handleShortcut.current(ev)) ev.preventDefault();
     };

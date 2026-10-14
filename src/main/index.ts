@@ -8,9 +8,41 @@ const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
 const DEV_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+/;
 const DEV_SERVER_TIMEOUT_MS = 30000;
 const BRIDGE_FILES = ['phaser-forge-bridge.js', 'phaser-forge-bridge.d.ts'];
+const SCRIPT_NAME_RE = /^[\w:.-]+$/;
 
 let mainWin: BrowserWindow | null = null;
 let devProc: ChildProcess | null = null;
+// Path IPC is confined to folders picked in the dialog. Earlier picks stay valid: a cancelled setup keeps the old project open.
+const openedRoots = new Set<string>();
+
+const isInside = (root: string, target: string) => {
+  const rel = path.relative(root, target);
+  return rel.split(path.sep)[0] !== '..' && !path.isAbsolute(rel);
+};
+
+function guardPath(p: unknown): string | null {
+  if (typeof p !== 'string' || !p || p.includes('\0')) return null;
+  const file = path.resolve(p);
+  let real: string;
+  try {
+    real = fs.realpathSync.native(file);
+  } catch {
+    // Missing is fine (to be created); a dangling link is not.
+    try { fs.lstatSync(file); return null; } catch { /* missing */ }
+    try { real = path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file)); } catch { return null; }
+  }
+  return [...openedRoots].some(root => isInside(root, real)) ? file : null;
+}
+
+function guardFolder(p: unknown): string | null {
+  const dir = guardPath(p);
+  try { return dir && fs.statSync(dir).isDirectory() ? dir : null; } catch { return null; }
+}
+
+const guardFile = (folder: unknown, name: string) => {
+  const dir = guardFolder(folder);
+  return dir && guardPath(path.join(dir, name));
+};
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 const toPosix = (p: string) => p.replace(/\\/g, '/');
@@ -33,6 +65,16 @@ function writeJson(file: string, data: unknown) {
   }
 }
 
+const readIn = (folder: unknown, name: string) => {
+  const file = guardFile(folder, name);
+  return file ? readJson(file) : null;
+};
+
+const writeIn = (folder: unknown, name: string, data: unknown) => {
+  const file = guardFile(folder, name);
+  return file ? writeJson(file, data) : false;
+};
+
 // `npm run` goes through a shell, so killing the child alone would orphan the dev server.
 function stopDevServer() {
   const proc = devProc;
@@ -44,13 +86,15 @@ function stopDevServer() {
 
 /** The local `<script type="module" src>` in index.html, i.e. where the bridge should be installed. */
 function findEntryScript(folder: string): string | null {
+  const indexFile = guardFile(folder, 'index.html');
+  if (!indexFile) return null;
   let html: string;
-  try { html = fs.readFileSync(path.join(folder, 'index.html'), 'utf-8'); } catch { return null; }
+  try { html = fs.readFileSync(indexFile, 'utf-8'); } catch { return null; }
   for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
     const src = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
     if (!/\btype\s*=\s*["']module["']/i.test(tag) || !src || /^[a-z]+:/i.test(src)) continue;
-    const file = path.join(folder, src.replace(/^\//, ''));
-    if (fs.existsSync(file)) return file;
+    const file = guardPath(path.join(folder, src.replace(/^\//, '')));
+    if (file && fs.existsSync(file)) return file;
   }
   return null;
 }
@@ -98,12 +142,22 @@ app.whenReady().then(() => {
       properties: ['openDirectory'],
       title: 'Open Phaser Project Folder',
     });
-    return result.canceled ? null : result.filePaths[0] ?? null;
+    const picked = result.canceled ? null : result.filePaths[0] ?? null;
+    if (!picked) return null;
+    try { openedRoots.add(fs.realpathSync.native(picked)); } catch { return null; }
+    return picked;
   });
 
-  ipcMain.handle('devserver:start', (_e, folder: string, script?: string) => {
+  ipcMain.handle('devserver:start', (_e, folder: unknown, script?: unknown) => {
+    const cwd = guardFolder(folder);
+    if (!cwd) return { ok: false, error: 'Folder is not inside the opened project.' };
+    const runScript = (typeof script === 'string' && script.trim()) || 'dev';
+    // The name reaches a shell.
+    const scripts = readIn(cwd, 'package.json')?.scripts;
+    if (!SCRIPT_NAME_RE.test(runScript) || !scripts || !Object.hasOwn(scripts, runScript)) {
+      return { ok: false, error: `Unknown script "${runScript}" (not in package.json).` };
+    }
     stopDevServer();
-    const runScript = script?.trim() || 'dev';
 
     return new Promise<{ ok: boolean; url?: string; error?: string }>(resolve => {
       let settled = false;
@@ -119,7 +173,7 @@ app.whenReady().then(() => {
       );
 
       sendToRenderer('devserver:output', `[Running: npm run ${runScript}]\n`);
-      const proc = spawn('npm', ['run', runScript], { cwd: folder, shell: true, detached: !IS_WIN });
+      const proc = spawn('npm', ['run', runScript], { cwd, shell: true, detached: !IS_WIN });
       devProc = proc;
 
       const onData = (data: Buffer) => {
@@ -148,21 +202,26 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
-  ipcMain.handle('vscode:open', (_e, folder: string) => {
+  ipcMain.handle('vscode:open', (_e, rawFolder: unknown) => {
+    const folder = guardFolder(rawFolder);
+    if (!folder) return;
     // `code` is a .cmd shim on Windows and needs a shell; quotes are safe there since paths can't contain them.
     spawn('code', [IS_WIN ? `"${folder}"` : folder], { shell: IS_WIN, detached: true, stdio: 'ignore' })
       .on('error', () => {})
       .unref();
   });
 
-  ipcMain.handle('bridge:install', (_e, folder: string) => {
+  ipcMain.handle('bridge:install', (_e, rawFolder: unknown) => {
+    const folder = guardFolder(rawFolder);
+    const targets = BRIDGE_FILES.map(file => guardFile(folder, file));
+    if (!folder || targets.some(t => !t)) return { ok: false, error: 'Folder is not inside the opened project.' };
     const sourceDir = [
       path.join(app.getAppPath(), 'src', 'bridge'),
       path.join(process.resourcesPath, 'bridge'),
     ].find(dir => fs.existsSync(path.join(dir, BRIDGE_FILES[0])));
     if (!sourceDir) return { ok: false, error: 'Bridge SDK source file not found.' };
     try {
-      for (const file of BRIDGE_FILES) fs.copyFileSync(path.join(sourceDir, file), path.join(folder, file));
+      BRIDGE_FILES.forEach((file, i) => fs.copyFileSync(path.join(sourceDir, file), targets[i]!));
     } catch (e) {
       return { ok: false, error: (e as Error).message };
     }
@@ -172,13 +231,17 @@ app.whenReady().then(() => {
     return { ok: true, entry: toPosix(path.relative(folder, entry)), importPath: importPath.startsWith('.') ? importPath : `./${importPath}` };
   });
 
-  ipcMain.handle('fs:readAssets', (_e, folder: string) => {
+  ipcMain.handle('fs:readAssets', (_e, rawFolder: unknown) => {
+    const folder = guardFolder(rawFolder);
+    if (!folder) return [];
     const assetsDir = path.join(folder, 'assets');
-    const root = fs.existsSync(assetsDir) ? assetsDir : folder;
-    return scanAssets(root, root);
+    const root = fs.existsSync(assetsDir) ? guardFolder(assetsDir) : folder;
+    return root ? scanAssets(root, root) : [];
   });
 
-  ipcMain.handle('fs:fileToDataUrl', (_e, fullPath: string) => {
+  ipcMain.handle('fs:fileToDataUrl', (_e, rawPath: unknown) => {
+    const fullPath = guardPath(rawPath);
+    if (!fullPath || !IMAGE_EXTS.includes(path.extname(fullPath).toLowerCase())) return null;
     try {
       const ext = path.extname(fullPath).slice(1).toLowerCase();
       const mime = ext === 'svg' ? 'image/svg+xml' : `image/${ext === 'jpg' ? 'jpeg' : ext}`;
@@ -188,18 +251,19 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('scene:save', (_e, folder: string, objects: object[]) =>
-    writeJson(path.join(folder, 'forge-scene.json'), { version: 1, objects }));
-  ipcMain.handle('scene:load', (_e, folder: string) => readJson(path.join(folder, 'forge-scene.json')));
+  ipcMain.handle('scene:save', (_e, folder: unknown, objects: object[]) =>
+    writeIn(folder, 'forge-scene.json', { version: 1, objects }));
+  ipcMain.handle('scene:load', (_e, folder: unknown) => readIn(folder, 'forge-scene.json'));
 
-  ipcMain.handle('project:readConfig', (_e, folder: string) => readJson(path.join(folder, '.phaser-forge.json')));
-  ipcMain.handle('project:writeConfig', (_e, folder: string, config: object) =>
-    writeJson(path.join(folder, '.phaser-forge.json'), config));
+  ipcMain.handle('project:readConfig', (_e, folder: unknown) => readIn(folder, '.phaser-forge.json'));
+  ipcMain.handle('project:writeConfig', (_e, folder: unknown, config: object) =>
+    writeIn(folder, '.phaser-forge.json', config));
 
   // Dev-server scripts only: `dev`, `dev:*`, and variants like `engine:dev:fantasy`.
-  ipcMain.handle('project:readScripts', (_e, folder: string) => {
-    const scripts = readJson(path.join(folder, 'package.json'))?.scripts ?? {};
-    return Object.keys(scripts).filter(n => n === 'dev' || n.startsWith('dev:') || /:dev(:|$)/.test(n));
+  ipcMain.handle('project:readScripts', (_e, folder: unknown) => {
+    const scripts = readIn(folder, 'package.json')?.scripts ?? {};
+    return Object.keys(scripts).filter(n =>
+      SCRIPT_NAME_RE.test(n) && (n === 'dev' || n.startsWith('dev:') || /:dev(:|$)/.test(n)));
   });
 
   createWindow();

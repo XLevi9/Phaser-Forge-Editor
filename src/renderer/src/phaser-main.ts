@@ -147,7 +147,7 @@ class EditorScene extends Phaser.Scene {
       cam.scrollY += before.y - after.y;
     });
 
-    window.addEventListener('message', ev => this.onMessage(ev.data));
+    window.addEventListener('message', ev => { if (ev.source === window.parent) this.onMessage(ev.data); });
     // Clicking the viewport focuses this iframe, so forward keys for the editor's shortcuts.
     window.addEventListener('keydown', e => {
       if ((e.ctrlKey || e.metaKey) && ['s', 'z', 'y'].includes(e.key.toLowerCase())) e.preventDefault();
