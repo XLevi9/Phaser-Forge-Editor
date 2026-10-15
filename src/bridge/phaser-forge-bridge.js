@@ -202,7 +202,7 @@ function announce() {
 if (IN_EDITOR) {
   window.addEventListener('message', (ev) => {
     const m = ev.data;
-    if (!m?.forge || !handlers[m.type]) return;
+    if (ev.source !== window.parent || !m?.forge || !handlers[m.type]) return;
     const game = getGame();
     if (!game && m.type !== 'FORGE_PING') return;
     handlers[m.type](m, game);
